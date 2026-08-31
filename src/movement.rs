@@ -6,7 +6,7 @@
 use bevy::math::Vec2;
 
 /// World units moved per second.
-pub const PLAYER_SPEED: f32 = 240.0;
+pub const PLAYER_SPEED: f32 = 4.0;
 
 /// Steps `position` along `direction` at `speed`, scaled by `dt`.
 ///
