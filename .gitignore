@@ -1,1 +1,4 @@
 /target
+
+# Per-agent sidecar referenced by AGENTS.md
+AGENTS.local.md
