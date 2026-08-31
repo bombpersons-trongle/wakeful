@@ -7,3 +7,7 @@ publish = false
 
 [dependencies]
 bevy = "0.19"
+# Compiles the OpenGL backend in (bevy omits it by default): keeps the game
+# runnable where other graphics drivers are missing, and lets the `snapshot`
+# dev tool render headless on software GL.
+bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
