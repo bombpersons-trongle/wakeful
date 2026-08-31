@@ -1,27 +1,53 @@
 mod movement;
+mod scene;
 mod screen;
+mod systems;
 
-use bevy::camera::RenderTarget;
-use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
+use bevy::world_serialization::WorldAsset;
+use bevy_common_assets::ron::RonAssetPlugin;
 
-use crate::movement::{PLAYER_SPEED, move_position};
+use crate::scene::Scene;
+use crate::systems::{camera, debug_draw, input, player, scene as scene_loader, world};
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
 const FIXED_HZ: f64 = 60.0;
 
-/// Capsule geometry; `PLAYER_Y` keeps it resting on the ground plane.
-const PLAYER_RADIUS: f32 = 0.4;
-const PLAYER_HALF_HEIGHT: f32 = 0.5;
-const PLAYER_Y: f32 = PLAYER_RADIUS + PLAYER_HALF_HEIGHT;
-const GROUND_SIZE: f32 = 30.0;
-const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
-const GROUND_COLOR: Color = Color::srgb(0.23, 0.21, 0.28);
-
+/// Marks the player actor; movement and model-swap systems target this
+/// entity.
 #[derive(Component)]
 struct Player;
+
+/// Marks the fixed gameplay camera whose pose the scene controls.
+#[derive(Component)]
+struct GameCamera;
+
+/// The scene the game is currently running. `load_scene` inserts it with a
+/// handle whose asset loads asynchronously; `apply_scene` polls it until
+/// the file arrives.
+#[derive(Resource)]
+struct CurrentScene(Handle<Scene>);
+
+/// One-shot flag pairing with `CurrentScene`: the bool starts `false` and
+/// `apply_scene` sets it `true` after turning the loaded scene into live
+/// entities, so the application runs exactly once even though the poll
+/// runs every frame.
+#[derive(Resource)]
+struct SceneApplied(bool);
+
+/// Character model queued for the player, held until its glTF finishes
+/// loading; `apply_player_model` removes it once applied.
+#[derive(Resource)]
+struct PlayerModel(Handle<WorldAsset>);
+
+type GameCameraQuery<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static mut Projection),
+    (With<GameCamera>, Without<Player>),
+>;
 
 fn main() {
     App::new()
@@ -33,99 +59,30 @@ fn main() {
             }),
             ..default()
         }))
+        .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(
             Startup,
             (
                 screen::setup_screen,
-                setup_game_camera,
-                spawn_world,
-                spawn_player,
+                camera::setup_game_camera,
+                world::spawn_world,
+                player::spawn_player,
+                scene_loader::load_scene,
             )
                 .chain(),
         )
-        .add_systems(Update, (quit_on_escape, screen::resize_present))
-        .add_systems(FixedUpdate, move_player)
+        .add_systems(
+            Update,
+            (
+                input::quit_on_escape,
+                screen::resize_present,
+                scene_loader::apply_scene,
+                scene_loader::apply_player_model,
+                debug_draw::debug_draw_walkables,
+            ),
+        )
+        .add_systems(FixedUpdate, player::move_player)
         .run();
-}
-
-fn quit_on_escape(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
-    if keys.just_pressed(KeyCode::Escape) {
-        exit.write(AppExit::Success);
-    }
-}
-
-/// FF7-style fixed view: high angle, looking down at the arena.
-fn setup_game_camera(mut commands: Commands, game_image: Res<screen::GameImage>) {
-    commands.spawn((
-        Camera3d::default(),
-        RenderTarget::Image(game_image.0.clone().into()),
-        RenderLayers::layer(0),
-        Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-}
-
-fn spawn_world(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    // Placeholder floor; a pre-rendered background image arrives with real art.
-    commands.spawn((
-        Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_SIZE, GROUND_SIZE))),
-        MeshMaterial3d(materials.add(StandardMaterial::from_color(GROUND_COLOR))),
-    ));
-
-    commands.spawn((
-        DirectionalLight::default(),
-        Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
-    ));
-}
-
-fn spawn_player(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.spawn((
-        Player,
-        Mesh3d(meshes.add(Capsule3d::new(PLAYER_RADIUS, PLAYER_HALF_HEIGHT))),
-        MeshMaterial3d(materials.add(StandardMaterial::from_color(PLAYER_COLOR))),
-        Transform::from_xyz(0.0, PLAYER_Y, 0.0),
-    ));
-}
-
-fn move_player(
-    time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
-    mut players: Query<&mut Transform, With<Player>>,
-) {
-    let Ok(mut transform) = players.single_mut() else {
-        return;
-    };
-
-    // Arrows map onto the ground plane as seen by the fixed camera:
-    // up walks away from the camera, down walks toward it.
-    let mut direction = Vec2::ZERO;
-    if keys.pressed(KeyCode::ArrowUp) {
-        direction.y -= 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowDown) {
-        direction.y += 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowLeft) {
-        direction.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowRight) {
-        direction.x += 1.0;
-    }
-
-    let moved = move_position(
-        transform.translation.xz(),
-        direction,
-        PLAYER_SPEED,
-        time.delta_secs(),
-    );
-    transform.translation = Vec3::new(moved.x, PLAYER_Y, moved.y);
 }

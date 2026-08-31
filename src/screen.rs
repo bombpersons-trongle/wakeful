@@ -64,10 +64,11 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     commands.insert_resource(GameImage(handle.clone()));
 
     // The present camera owns the window: black bars, then the texture.
+    // Order 2 = after the background (0) and 3D (1) cameras.
     commands.spawn((
         Camera2d,
         Camera {
-            order: 1,
+            order: 2,
             clear_color: ClearColorConfig::Custom(Color::BLACK),
             ..default()
         },

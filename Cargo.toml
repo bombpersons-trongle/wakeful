@@ -11,3 +11,8 @@ bevy = "0.19"
 # runnable where other graphics drivers are missing, and lets the `snapshot`
 # dev tool render headless on software GL.
 bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
+bevy_common_assets = { version = "0.17", features = ["ron"] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+ron = "0.12"

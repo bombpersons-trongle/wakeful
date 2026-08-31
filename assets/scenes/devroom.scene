@@ -1,0 +1,24 @@
+(
+    background: None,
+    camera: (
+        position: (0.0, 6.0, 9.0),
+        target: (0.0, 0.0, 0.0),
+        fov_degrees: 45.0,
+    ),
+    walkable: Some((
+        origin: (-2.5, -2.5),
+        cell_size: 1.0,
+        cols: 5,
+        rows: 5,
+        // The player spawns at the center cell, so that one stays
+        // walkable; blocked corners demo the clamping.
+        cells: [
+            false, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, false,
+        ],
+    )),
+    character_model: None,
+)
