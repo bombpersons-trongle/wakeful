@@ -1,0 +1,10 @@
+[package]
+name = "wakeful"
+version = "0.1.0"
+edition = "2024"
+description = "An RPG about identity and finding yourself"
+publish = false
+
+[dependencies]
+bevy = "0.19"
+bevy_pixcam = "0.19"
