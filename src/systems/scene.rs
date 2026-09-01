@@ -123,9 +123,16 @@ pub fn apply_scene(
 
     // Every scene application starts a fresh player at the scene's chosen
     // spot: the world origin on first load, the teleporter's arrival point
-    // after a transition.
+    // after a transition. The player starts facing screen-up (away from
+    // the camera).
     let at = spawn.map(|spawn| spawn.0).unwrap_or(Vec2::ZERO);
-    player::spawn_player(&mut commands, &mut meshes, &mut materials, at);
+    player::spawn_player(
+        &mut commands,
+        &mut meshes,
+        &mut materials,
+        at,
+        scene.camera_forward(),
+    );
     commands.remove_resource::<PlayerSpawn>();
 
     // A teleporter already under the player on arrival must not fire

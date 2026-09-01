@@ -54,6 +54,17 @@ impl Teleporter {
     }
 }
 
+impl Scene {
+    /// The camera's facing direction projected onto the ground plane:
+    /// what "screen up" means for movement and the player's spawn facing.
+    /// Zero when the camera looks straight down.
+    pub fn camera_forward(&self) -> Vec2 {
+        let position = Vec2::new(self.camera.position[0], self.camera.position[2]);
+        let target = Vec2::new(self.camera.target[0], self.camera.target[2]);
+        (target - position).normalize_or_zero()
+    }
+}
+
 #[derive(Deserialize, Serialize)]
 pub struct WalkableGrid {
     /// World XZ position of the corner of cell `[0][0]`.
@@ -447,6 +458,34 @@ mod tests {
             .expect("devroom needs a walkable grid");
         assert!(grid1.is_circle_walkable(to_devroom.arrival[0], to_devroom.arrival[1], radius));
         assert!(to_room2.contains(to_devroom.arrival[0], to_devroom.arrival[1]));
+    }
+
+    #[test]
+    fn camera_forward_points_from_the_camera_toward_its_target() {
+        // devroom-style: camera above +Z looking at the origin -> -Z.
+        let mut scene = devroom_scene();
+        assert_eq!(scene.camera_forward(), Vec2::NEG_Y);
+        // room2-style: camera above -Z -> +Z.
+        scene.camera.position = [0.0, 7.0, -6.0];
+        assert_eq!(scene.camera_forward(), Vec2::Y);
+        // Looking straight down has no ground facing.
+        scene.camera.position = [0.0, 6.0, 0.0];
+        scene.camera.target = [0.0, 0.0, 0.0];
+        assert_eq!(scene.camera_forward(), Vec2::ZERO);
+    }
+
+    fn devroom_scene() -> Scene {
+        Scene {
+            background: None,
+            camera: CameraPose {
+                position: [0.0, 6.0, 9.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            character_model: None,
+            teleporters: Vec::new(),
+        }
     }
 
     #[test]

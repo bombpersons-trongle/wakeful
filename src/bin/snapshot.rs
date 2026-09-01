@@ -32,8 +32,9 @@ const WIDTH: u32 = 320;
 const HEIGHT: u32 = 240;
 
 const PLAYER_RADIUS: f32 = 0.4;
-const PLAYER_HALF_HEIGHT: f32 = 0.5;
-const PLAYER_Y: f32 = PLAYER_RADIUS + PLAYER_HALF_HEIGHT;
+const PLAYER_LENGTH: f32 = 1.2;
+/// Resting height of the lying-cone placeholder.
+const PLAYER_Y: f32 = PLAYER_RADIUS;
 const GROUND_SIZE: f32 = 30.0;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
 const GROUND_COLOR: Color = Color::srgb(0.23, 0.21, 0.28);
@@ -130,10 +131,16 @@ fn setup_scene(
         Transform::from_xyz(4.0, 8.0, 4.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 
+    // Mirrors the game's placeholder: a lying cone facing away from the
+    // camera (-Z here).
     commands.spawn((
-        Mesh3d(meshes.add(Capsule3d::new(PLAYER_RADIUS, PLAYER_HALF_HEIGHT))),
+        Mesh3d(meshes.add(Cone {
+            radius: PLAYER_RADIUS,
+            height: PLAYER_LENGTH,
+        })),
         MeshMaterial3d(materials.add(StandardMaterial::from_color(PLAYER_COLOR))),
-        Transform::from_xyz(0.0, PLAYER_Y, 0.0),
+        Transform::from_xyz(0.0, PLAYER_Y, 0.0)
+            .with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z)),
     ));
 }
 
