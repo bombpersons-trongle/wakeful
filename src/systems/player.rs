@@ -3,7 +3,7 @@
 use bevy::prelude::*;
 
 use crate::editor::EditorState;
-use crate::movement::{PLAYER_SPEED, move_position};
+use crate::movement::{PLAYER_SPEED, camera_relative_direction, move_position};
 use crate::scene::Scene;
 use crate::{CurrentScene, Player};
 
@@ -48,33 +48,44 @@ pub fn move_player(
     let Ok(mut transform) = players.single_mut() else {
         return;
     };
+    let Some(scene) = current.as_ref().and_then(|c| scenes.get(&c.handle)) else {
+        return;
+    };
+    let position = Vec2::new(scene.camera.position[0], scene.camera.position[2]);
+    let target = Vec2::new(scene.camera.target[0], scene.camera.target[2]);
+    let forward = (target - position).normalize_or_zero();
 
-    // Arrows map onto the ground plane as seen by the fixed camera:
-    // up walks away from the camera, down walks toward it.
-    let mut direction = Vec2::ZERO;
+    // Arrows are camera-relative: up walks away from the camera, right
+    // walks to its screen-right, so controls stay intuitive whichever
+    // way the scene's camera faces.
+    let mut screen = Vec2::ZERO;
     if keys.pressed(KeyCode::ArrowUp) {
-        direction.y -= 1.0;
+        screen.y += 1.0;
     }
     if keys.pressed(KeyCode::ArrowDown) {
-        direction.y += 1.0;
+        screen.y -= 1.0;
     }
     if keys.pressed(KeyCode::ArrowLeft) {
-        direction.x -= 1.0;
+        screen.x -= 1.0;
     }
     if keys.pressed(KeyCode::ArrowRight) {
-        direction.x += 1.0;
+        screen.x += 1.0;
     }
 
     let from = transform.translation.xz();
-    let moved = move_position(from, direction, PLAYER_SPEED, time.delta_secs());
+    let moved = move_position(
+        from,
+        camera_relative_direction(screen, forward),
+        PLAYER_SPEED,
+        time.delta_secs(),
+    );
 
     // The scene's walkable grid bounds where the player may go; the body
     // (not just the center point) stays inside, and sliding along blocked
     // cells keeps movement feeling responsive.
-    let moved = current
+    let moved = scene
+        .walkable
         .as_ref()
-        .and_then(|c| scenes.get(&c.handle))
-        .and_then(|scene| scene.walkable.as_ref())
         .map(|grid| grid.constrain(from, moved, PLAYER_RADIUS))
         .unwrap_or(moved);
 
