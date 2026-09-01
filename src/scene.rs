@@ -5,28 +5,29 @@
 use bevy::asset::Asset;
 use bevy::math::Vec2;
 use bevy::reflect::TypePath;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Asset, TypePath, Deserialize)]
+#[derive(Asset, TypePath, Deserialize, Serialize)]
 pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
     /// the game's virtual resolution (320x240), like a pre-rendered FF7 room.
     pub background: Option<String>,
     pub camera: CameraPose,
     pub walkable: Option<WalkableGrid>,
-    /// Path to the player's glTF scene, e.g. `models/hero.gltf#Scene0`.
+    /// Path to the player's glTF model, e.g. `models/hero.glb`. The file's
+    /// default scene is spawned; a `#SceneN` suffix, if present, is ignored.
     /// When absent, the player is the placeholder capsule.
     pub character_model: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize, Clone, Copy)]
 pub struct CameraPose {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub fov_degrees: f32,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 pub struct WalkableGrid {
     /// World XZ position of the corner of cell `[0][0]`.
     pub origin: [f32; 2],
@@ -68,21 +69,75 @@ impl WalkableGrid {
         Some((col, row))
     }
 
-    /// Restricts a desired movement so the result stays on walkable cells.
+    /// Restricts a desired movement so the character (a circle of `radius`
+    /// around its center) stays entirely on walkable cells.
     ///
     /// Tries the full move first, then each axis alone, so the character
     /// slides along walls of blocked cells instead of sticking to them.
-    pub fn constrain(&self, from: Vec2, to: Vec2) -> Vec2 {
-        if self.is_walkable(to.x, to.y) {
+    /// Radius `<= 0` constrains the center point alone.
+    pub fn constrain(&self, from: Vec2, to: Vec2, radius: f32) -> Vec2 {
+        if self.is_circle_walkable(to.x, to.y, radius) {
             return to;
         }
-        if self.is_walkable(to.x, from.y) {
+        if self.is_circle_walkable(to.x, from.y, radius) {
             return Vec2::new(to.x, from.y);
         }
-        if self.is_walkable(from.x, to.y) {
+        if self.is_circle_walkable(from.x, to.y, radius) {
             return Vec2::new(from.x, to.y);
         }
         from
+    }
+
+    /// Whether a circle of `radius` at the position lies entirely on
+    /// walkable cells; cells outside the grid count as blocked. Radius
+    /// `<= 0` reduces to the point test. Touching a blocked cell exactly
+    /// still counts as walkable, so characters can rest against walls.
+    pub fn is_circle_walkable(&self, x: f32, z: f32, radius: f32) -> bool {
+        if self.cell_size <= 0.0 {
+            return false;
+        }
+        if radius <= 0.0 {
+            return self.is_walkable(x, z);
+        }
+        // Only cells overlapping the circle's bounding box can touch the
+        // circle, so the distance test runs against those alone.
+        let min_col = ((x - radius - self.origin[0]) / self.cell_size).floor() as i64;
+        let max_col = ((x + radius - self.origin[0]) / self.cell_size).floor() as i64;
+        let min_row = ((z - radius - self.origin[1]) / self.cell_size).floor() as i64;
+        let max_row = ((z + radius - self.origin[1]) / self.cell_size).floor() as i64;
+        for row in min_row..=max_row {
+            for col in min_col..=max_col {
+                let blocked = col < 0
+                    || row < 0
+                    || col as usize >= self.cols
+                    || row as usize >= self.rows
+                    || !self.cells[row as usize * self.cols + col as usize];
+                if !blocked {
+                    continue;
+                }
+                // Distance from the center to the closest point of the
+                // cell's rect; overlap means the circle leaves the
+                // walkable area.
+                let min_x = self.origin[0] + col as f32 * self.cell_size;
+                let min_z = self.origin[1] + row as f32 * self.cell_size;
+                let dx = x - x.clamp(min_x, min_x + self.cell_size);
+                let dz = z - z.clamp(min_z, min_z + self.cell_size);
+                if dx * dx + dz * dz < radius * radius {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Sets the walkable flag of the cell containing the world position.
+    /// Returns false (leaving the grid unchanged) if it lies outside.
+    pub fn set_walkable(&mut self, x: f32, z: f32, walkable: bool) -> bool {
+        let Some((col, row)) = self.cell_at(x, z) else {
+            return false;
+        };
+        self.cells[row * self.cols + col] = walkable;
+        true
     }
 }
 
@@ -135,7 +190,7 @@ mod tests {
         let grid = grid();
         let from = Vec2::new(-1.5, -1.5);
         let to = Vec2::new(-1.4, -1.4);
-        assert_eq!(grid.constrain(from, to), to);
+        assert_eq!(grid.constrain(from, to, 0.0), to);
     }
 
     #[test]
@@ -144,7 +199,7 @@ mod tests {
         // moving right into a blocked cell slides on Z, the free axis
         let from = Vec2::new(-1.5, -1.5);
         let to = Vec2::new(-0.5, -1.4);
-        assert_eq!(grid.constrain(from, to), Vec2::new(-1.5, -1.4));
+        assert_eq!(grid.constrain(from, to, 0.0), Vec2::new(-1.5, -1.4));
     }
 
     #[test]
@@ -153,7 +208,72 @@ mod tests {
         // diagonal target, X neighbor, and Z neighbor are all blocked
         let from = Vec2::new(-1.5, -1.5);
         let to = Vec2::new(-0.5, -0.4);
-        assert_eq!(grid.constrain(from, to), from);
+        assert_eq!(grid.constrain(from, to, 0.0), from);
+    }
+
+    #[test]
+    fn constrain_rejects_moves_that_overhang_the_region() {
+        // The center point of `to` is walkable, but a body of radius 0.4
+        // around it would stick out past the grid's far edge.
+        let mut grid = grid();
+        grid.cols = 5;
+        grid.rows = 5;
+        grid.origin = [-2.5, -2.5];
+        grid.cells = vec![true; 25];
+        let from = Vec2::new(0.0, 0.0);
+        let to = Vec2::new(0.0, -2.15);
+        assert_eq!(grid.constrain(from, to, 0.4), from);
+        // Close enough to keep the whole body inside: the move passes.
+        let near_edge = Vec2::new(0.0, -2.05);
+        assert_eq!(grid.constrain(from, near_edge, 0.4), near_edge);
+    }
+
+    #[test]
+    fn a_body_fits_through_one_cell_wide_corridors() {
+        // Only the middle row is walkable; a radius-0.4 body passes down
+        // its centerline without touching the blocked rows.
+        let mut grid = grid();
+        grid.cols = 3;
+        grid.rows = 3;
+        grid.origin = [-1.5, -1.5];
+        grid.cells = vec![false, false, false, true, true, true, false, false, false];
+        let from = Vec2::new(-1.0, 0.0);
+        let to = Vec2::new(1.0, 0.0);
+        assert_eq!(grid.constrain(from, to, 0.4), to);
+    }
+
+    #[test]
+    fn a_body_rests_against_blocked_cells() {
+        // Moving toward a blocked cell stops where the body touches it.
+        let mut grid = grid();
+        grid.cols = 3;
+        grid.rows = 1;
+        grid.origin = [-1.5, -0.5];
+        grid.cells = vec![true, true, false];
+        let from = Vec2::new(-1.0, 0.0);
+        let to = Vec2::new(0.5, 0.0);
+        // The blocked cell spans x [0.5, 1.5]; the body's edge rests at its
+        // boundary, so the center stops 0.4 short of it.
+        assert_eq!(grid.constrain(from, to, 0.4), from);
+        let resting = Vec2::new(0.1, 0.0);
+        assert_eq!(grid.constrain(from, resting, 0.4), resting);
+    }
+
+    #[test]
+    fn set_walkable_flips_the_cell_under_a_position() {
+        let mut grid = grid();
+        assert!(!grid.is_walkable(-0.5, -1.5));
+        assert!(grid.set_walkable(-0.5, -1.5, true));
+        assert!(grid.is_walkable(-0.5, -1.5));
+        assert!(grid.set_walkable(-0.5, -1.5, false));
+        assert!(!grid.is_walkable(-0.5, -1.5));
+    }
+
+    #[test]
+    fn set_walkable_ignores_outside_positions() {
+        let mut grid = grid();
+        assert!(!grid.set_walkable(50.0, 50.0, true));
+        assert_eq!(grid.cells, [true, false, false, false]);
     }
 
     #[test]

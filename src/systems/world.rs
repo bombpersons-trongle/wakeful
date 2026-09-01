@@ -2,6 +2,8 @@
 
 use bevy::prelude::*;
 
+use crate::Ground;
+
 /// Size of the placeholder ground plane.
 const GROUND_SIZE: f32 = 30.0;
 const GROUND_COLOR: Color = Color::srgb(0.23, 0.21, 0.28);
@@ -11,8 +13,10 @@ pub fn spawn_world(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
 ) {
-    // Placeholder floor; a pre-rendered background image arrives with real art.
+    // Placeholder floor; hidden by `sync_ground` when the scene provides a
+    // pre-rendered background image.
     commands.spawn((
+        Ground,
         Mesh3d(meshes.add(Plane3d::default().mesh().size(GROUND_SIZE, GROUND_SIZE))),
         MeshMaterial3d(materials.add(StandardMaterial::from_color(GROUND_COLOR))),
     ));

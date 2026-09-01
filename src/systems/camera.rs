@@ -24,9 +24,7 @@ pub fn setup_game_camera(mut commands: Commands, game_image: Res<GameImage>) {
             ..default()
         },
         Msaa::Off,
-        DitherPostProcess {
-            ..dither::tuned()
-        },
+        DitherPostProcess { ..dither::tuned() },
         RenderTarget::Image(game_image.0.clone().into()),
         RenderLayers::layer(0),
         Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),

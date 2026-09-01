@@ -111,9 +111,7 @@ fn setup_scene(
         Camera3d::default(),
         Msaa::Off,
         RenderTarget::Image(scene_image.into()),
-        dither::DitherPostProcess {
-            ..dither::tuned()
-        },
+        dither::DitherPostProcess { ..dither::tuned() },
         Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y),
     ));
 

@@ -81,7 +81,8 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     ));
 }
 
-/// Runs every frame; cheap, and also covers window resizes for free.
+/// Runs every frame; cheap, and also covers window resizes and scale
+/// factor changes for free.
 pub fn resize_present(
     window: Query<&Window, With<PrimaryWindow>>,
     mut present: Query<&mut Sprite, With<PresentSprite>>,
@@ -124,5 +125,29 @@ mod tests {
             presented_size(UVec2::new(1920, 1080), game_size()),
             UVec2::new(1280, 960)
         );
+    }
+
+    #[test]
+    fn resize_present_sizes_the_sprite_in_logical_units() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        // A scale-2 (Retina) window: physical 1280x960, logical 640x480.
+        // Sizing the sprite from physical pixels over-sizes it 2x, which
+        // crops the picture and skews cursor mapping.
+        let mut world = World::new();
+        world.spawn((
+            PrimaryWindow,
+            Window {
+                resolution: bevy::window::WindowResolution::new(1280, 960)
+                    .with_scale_factor_override(2.0),
+                ..default()
+            },
+        ));
+        let sprite_entity = world.spawn((PresentSprite, Sprite::default())).id();
+
+        world.run_system_once(resize_present).unwrap();
+
+        let size = world.get::<Sprite>(sprite_entity).unwrap().custom_size;
+        assert_eq!(size, Some(Vec2::new(640.0, 480.0)));
     }
 }

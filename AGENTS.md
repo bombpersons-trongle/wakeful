@@ -5,11 +5,13 @@ contribution, whether human-reviewed or machine-made.
 
 ## Local extensions
 
+This file holds general project guidance for any agent working on the
+repository. Anything specific to one agent or their environment — identity,
+voice, sandbox setup, machine paths — belongs in `AGENTS.local.md` instead.
+
 If an `AGENTS.local.md` file exists next to this one, read it too and follow
-it as an extension of these guidelines. It is gitignored on purpose: it holds
-per-agent context (identity, voice, environment) that doesn't belong in the
-repo. Treat it as a peer of this file when present, but never commit it —
-and don't count on it existing in fresh checkouts.
+it as an extension of these guidelines. It is gitignored on purpose and is
+never committed; don't count on it existing in fresh checkouts.
 
 ## How to write code
 
@@ -31,7 +33,7 @@ High quality or nothing. Concretely:
 
 Contributors work like any outside contributor — no special privileges:
 
-- Work in your own **fork**, on `june/*`-prefixed branches, and deliver
+- Work in your own **fork**, on clearly named branches, and deliver
   everything through **pull requests**. Never push directly to this
   repository, even when the token would technically allow it.
 - The maintainer reviews and merges. Your job ends at a clean, reviewable PR.
@@ -65,7 +67,7 @@ Contributors work like any outside contributor — no special privileges:
   components/resources the systems operate on. Self-contained feature modules
   (e.g. the editor) may keep their own systems internally.
 - Rendering uses an offscreen pipeline (`src/screen.rs`): the game renders to
-  a 640x480 texture, which a present camera integer-upscales with black bars
+  a 320x240 texture, which a present camera integer-upscales with black bars
   — full retro pixelation for 2D and 3D alike.
 - Movement runs on a fixed 60hz `FixedUpdate` schedule; the movement math in
   `movement.rs` is ECS-free and unit tested.

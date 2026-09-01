@@ -12,7 +12,7 @@ bevy = "0.19"
 # dev tool render headless on software GL.
 bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
 bevy_common_assets = { version = "0.17", features = ["ron"] }
-serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
+# In-game scene editor UI.
+bevy_egui = "0.42"
 ron = "0.12"
+serde = { version = "1", features = ["derive"] }

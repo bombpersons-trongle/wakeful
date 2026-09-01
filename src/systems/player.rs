@@ -2,6 +2,7 @@
 
 use bevy::prelude::*;
 
+use crate::editor::EditorState;
 use crate::movement::{PLAYER_SPEED, move_position};
 use crate::scene::Scene;
 use crate::{CurrentScene, Player};
@@ -30,8 +31,14 @@ pub fn move_player(
     keys: Res<ButtonInput<KeyCode>>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
+    editor: Option<Res<EditorState>>,
     mut players: Query<&mut Transform, With<Player>>,
 ) {
+    // Editing pauses play: the mouse paints cells and the camera pose is
+    // whatever the panel says.
+    if editor.is_some_and(|editor| editor.open) {
+        return;
+    }
     let Ok(mut transform) = players.single_mut() else {
         return;
     };
@@ -55,13 +62,14 @@ pub fn move_player(
     let from = transform.translation.xz();
     let moved = move_position(from, direction, PLAYER_SPEED, time.delta_secs());
 
-    // The scene's walkable grid bounds where the player may go; sliding
-    // along blocked cells keeps movement feeling responsive.
+    // The scene's walkable grid bounds where the player may go; the body
+    // (not just the center point) stays inside, and sliding along blocked
+    // cells keeps movement feeling responsive.
     let moved = current
         .as_ref()
-        .and_then(|c| scenes.get(&c.0))
+        .and_then(|c| scenes.get(&c.handle))
         .and_then(|scene| scene.walkable.as_ref())
-        .map(|grid| grid.constrain(from, moved))
+        .map(|grid| grid.constrain(from, moved, PLAYER_RADIUS))
         .unwrap_or(moved);
 
     transform.translation = Vec3::new(moved.x, PLAYER_Y, moved.y);
