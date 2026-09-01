@@ -1,0 +1,34 @@
+// Test destination for the devroom teleporter: visibly different camera,
+// its own walkable grid, and a return teleporter on the west edge.
+(
+    camera: (
+        position: (0.0, 7.0, -6.0),
+        target: (0.0, 0.0, 0.0),
+        fov_degrees: 55.0,
+    ),
+    walkable: Some((
+        origin: (-2.5, -2.5),
+        cell_size: 1.0,
+        cols: 5,
+        rows: 5,
+        cells: [
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true,
+            true, true, true, true, true,
+        ],
+    )),
+    character_model: None,
+    background: None,
+    // Returns to devroom; arrival is the world origin, clear of devroom's
+    // trigger, so the player doesn't bounce straight back.
+    teleporters: [
+        (
+            position: (-2.0, 0.0),
+            size: (0.8, 2.0),
+            target: "scenes/devroom.scene",
+            arrival: (0.0, 0.0),
+        ),
+    ],
+)

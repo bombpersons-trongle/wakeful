@@ -6,4 +6,5 @@ pub mod debug_draw;
 pub mod input;
 pub mod player;
 pub mod scene;
+pub mod teleport;
 pub mod world;

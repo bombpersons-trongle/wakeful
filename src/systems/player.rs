@@ -13,16 +13,20 @@ const PLAYER_HALF_HEIGHT: f32 = 0.5;
 const PLAYER_Y: f32 = PLAYER_RADIUS + PLAYER_HALF_HEIGHT;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
 
-pub fn spawn_player(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
+/// Spawns the player capsule at a world XZ position. Called by scene
+/// application, so every scene starts with a fresh player; teleporters
+/// pick the position via the scene's arrival data.
+pub(crate) fn spawn_player(
+    commands: &mut Commands,
+    meshes: &mut Assets<Mesh>,
+    materials: &mut Assets<StandardMaterial>,
+    at: Vec2,
 ) {
     commands.spawn((
         Player,
         Mesh3d(meshes.add(Capsule3d::new(PLAYER_RADIUS, PLAYER_HALF_HEIGHT))),
         MeshMaterial3d(materials.add(StandardMaterial::from_color(PLAYER_COLOR))),
-        Transform::from_xyz(0.0, PLAYER_Y, 0.0),
+        Transform::from_xyz(at.x, PLAYER_Y, at.y),
     ));
 }
 

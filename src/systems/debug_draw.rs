@@ -4,7 +4,7 @@ use bevy::math::Isometry3d;
 use bevy::prelude::*;
 
 use crate::CurrentScene;
-use crate::scene::{Scene, WalkableGrid};
+use crate::scene::{Scene, Teleporter, WalkableGrid};
 
 /// The overlay is drawn just above the ground so the rects don't z-fight
 /// with it.
@@ -16,9 +16,13 @@ const DEBUG_BLOCKED_COLOR: Color = Color::srgba(0.9, 0.25, 0.2, 0.16);
 /// and the later-drawn rect overpaints the shared edge, hiding blocked
 /// cells' red under walkable green.
 const DEBUG_GRID_RECT_INSET: f32 = 0.9;
+/// Teleporter outlines sit above the grid rects so both stay visible.
+const DEBUG_TELEPORT_Y: f32 = 0.04;
+const DEBUG_TELEPORT_COLOR: Color = Color::srgba(0.95, 0.55, 0.15, 0.6);
 
-/// Toggled with F2: outlines the scene's walkable grid on the ground so
-/// movement bounds are visible while testing.
+/// Toggled with F2: outlines the scene's walkable grid and teleporter
+/// triggers on the ground so movement bounds and transition zones are
+/// visible while testing.
 pub fn debug_draw_walkables(
     keys: Res<ButtonInput<KeyCode>>,
     scenes: Res<Assets<Scene>>,
@@ -32,14 +36,13 @@ pub fn debug_draw_walkables(
     if !*enabled {
         return;
     }
-    let Some(grid) = current
-        .as_ref()
-        .and_then(|c| scenes.get(&c.handle))
-        .and_then(|scene| scene.walkable.as_ref())
-    else {
+    let Some(scene) = current.as_ref().and_then(|c| scenes.get(&c.handle)) else {
         return;
     };
-    draw_walkable_grid(&mut gizmos, grid);
+    if let Some(grid) = &scene.walkable {
+        draw_walkable_grid(&mut gizmos, grid);
+    }
+    draw_teleporters(&mut gizmos, &scene.teleporters);
 }
 
 /// Draws one rect per cell: bright for walkable, dim for blocked.
@@ -64,5 +67,24 @@ pub fn draw_walkable_grid(gizmos: &mut Gizmos, grid: &WalkableGrid) {
                 },
             );
         }
+    }
+}
+
+/// Draws one rect per teleporter trigger.
+pub fn draw_teleporters(gizmos: &mut Gizmos, teleporters: &[Teleporter]) {
+    let rotation = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+    for teleporter in teleporters {
+        gizmos.rect(
+            Isometry3d::new(
+                Vec3::new(
+                    teleporter.position[0],
+                    DEBUG_TELEPORT_Y,
+                    teleporter.position[1],
+                ),
+                rotation,
+            ),
+            Vec2::new(teleporter.size[0], teleporter.size[1]),
+            DEBUG_TELEPORT_COLOR,
+        );
     }
 }

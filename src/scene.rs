@@ -18,6 +18,9 @@ pub struct Scene {
     /// default scene is spawned; a `#SceneN` suffix, if present, is ignored.
     /// When absent, the player is the placeholder capsule.
     pub character_model: Option<String>,
+    /// Trigger rects that load another scene when the player touches one.
+    #[serde(default)]
+    pub teleporters: Vec<Teleporter>,
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
@@ -25,6 +28,38 @@ pub struct CameraPose {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub fov_degrees: f32,
+}
+
+#[derive(Deserialize, Serialize, Debug, PartialEq)]
+pub struct Teleporter {
+    /// World XZ center of the trigger rect.
+    pub position: [f32; 2],
+    /// Full XZ extents of the trigger rect.
+    pub size: [f32; 2],
+    /// Scene file (path relative to `assets/`) to load on touch.
+    pub target: String,
+    /// World XZ position where the player appears in the target scene.
+    pub arrival: [f32; 2],
+}
+
+impl Teleporter {
+    /// Whether the world XZ position lies inside the trigger rect. The
+    /// low edge counts as inside, the high edge belongs to the next rect
+    /// over, matching how the walkable grid assigns cell boundaries.
+    pub fn contains(&self, x: f32, z: f32) -> bool {
+        let half_x = self.size[0] / 2.0;
+        let half_z = self.size[1] / 2.0;
+        (self.position[0] - half_x..self.position[0] + half_x).contains(&x)
+            && (self.position[1] - half_z..self.position[1] + half_z).contains(&z)
+    }
+}
+
+impl Scene {
+    /// The first teleporter whose trigger rect contains the world XZ
+    /// position, if any.
+    pub fn teleporter_at(&self, x: f32, z: f32) -> Option<&Teleporter> {
+        self.teleporters.iter().find(|t| t.contains(x, z))
+    }
 }
 
 #[derive(Deserialize, Serialize)]
@@ -296,6 +331,165 @@ mod tests {
         let grid = scene.walkable.unwrap();
         assert!(grid.is_walkable(-1.5, -1.5));
         assert!(!grid.is_walkable(-0.5, -1.5));
+    }
+
+    #[test]
+    fn parses_teleporters() {
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+            teleporters: [
+                (
+                    position: (4.0, 0.0),
+                    size: (2.0, 1.0),
+                    target: "scenes/room2.scene",
+                    arrival: (1.0, 2.0),
+                ),
+            ],
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        let [teleporter] = &scene.teleporters[..] else {
+            panic!("expected exactly one teleporter");
+        };
+        assert_eq!(teleporter.position, [4.0, 0.0]);
+        assert_eq!(teleporter.size, [2.0, 1.0]);
+        assert_eq!(teleporter.target, "scenes/room2.scene");
+        assert_eq!(teleporter.arrival, [1.0, 2.0]);
+        assert_eq!(scene.teleporter_at(4.0, 0.0), Some(teleporter));
+        assert_eq!(scene.teleporter_at(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn teleporters_default_to_empty_when_omitted() {
+        // Scenes written before teleporters existed keep loading.
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert!(scene.teleporters.is_empty());
+        assert_eq!(scene.teleporter_at(0.0, 0.0), None);
+    }
+
+    #[test]
+    fn teleporters_round_trip_through_ron() {
+        let scene = Scene {
+            background: None,
+            camera: CameraPose {
+                position: [0.0, 6.0, 9.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            character_model: None,
+            teleporters: vec![Teleporter {
+                position: [4.0, 0.0],
+                size: [2.0, 1.0],
+                target: "scenes/room2.scene".into(),
+                arrival: [1.0, 2.0],
+            }],
+        };
+        let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
+        let reparsed: Scene = ron::from_str(&text).unwrap();
+        assert_eq!(reparsed.teleporters, scene.teleporters);
+    }
+
+    #[test]
+    fn teleporter_contains_covers_the_rect_interior() {
+        let teleporter = Teleporter {
+            position: [4.0, 0.0],
+            size: [2.0, 1.0],
+            target: String::new(),
+            arrival: [0.0, 0.0],
+        };
+        // center and interior
+        assert!(teleporter.contains(4.0, 0.0));
+        assert!(teleporter.contains(3.1, 0.4));
+        // outside each side
+        assert!(!teleporter.contains(2.9, 0.0));
+        assert!(!teleporter.contains(5.1, 0.0));
+        assert!(!teleporter.contains(4.0, 0.6));
+        assert!(!teleporter.contains(4.0, -0.6));
+        // low edges inclusive, high edges exclusive
+        assert!(teleporter.contains(3.0, 0.0));
+        assert!(teleporter.contains(4.0, -0.5));
+        assert!(!teleporter.contains(5.0, 0.0));
+        assert!(!teleporter.contains(4.0, 0.5));
+    }
+
+    #[test]
+    fn teleporter_at_prefers_the_first_match() {
+        let scene = Scene {
+            background: None,
+            camera: CameraPose {
+                position: [0.0, 0.0, 0.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            character_model: None,
+            teleporters: vec![
+                Teleporter {
+                    position: [0.0, 0.0],
+                    size: [2.0, 2.0],
+                    target: "scenes/first.scene".into(),
+                    arrival: [0.0, 0.0],
+                },
+                Teleporter {
+                    position: [0.0, 0.0],
+                    size: [4.0, 4.0],
+                    target: "scenes/second.scene".into(),
+                    arrival: [0.0, 0.0],
+                },
+            ],
+        };
+        assert_eq!(
+            scene.teleporter_at(0.0, 0.0).unwrap().target,
+            "scenes/first.scene"
+        );
+    }
+
+    #[test]
+    fn the_shipped_teleporter_pair_is_consistent() {
+        // Both halves must parse, and each side's arrival point must be
+        // walkable and clear of the destination's own triggers, or the
+        // player would bounce straight back.
+        let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
+        let room2: Scene = ron::from_str(include_str!("../assets/scenes/room2.scene")).unwrap();
+
+        let [to_room2] = &devroom.teleporters[..] else {
+            panic!("devroom ships exactly one test teleporter");
+        };
+        assert_eq!(to_room2.target, "scenes/room2.scene");
+        let grid2 = room2
+            .walkable
+            .as_ref()
+            .expect("room2 needs a walkable grid");
+        assert!(grid2.is_walkable(to_room2.arrival[0], to_room2.arrival[1]));
+        assert!(
+            room2
+                .teleporter_at(to_room2.arrival[0], to_room2.arrival[1])
+                .is_none()
+        );
+
+        let [to_devroom] = &room2.teleporters[..] else {
+            panic!("room2 ships exactly one return teleporter");
+        };
+        assert_eq!(to_devroom.target, "scenes/devroom.scene");
+        let grid1 = devroom
+            .walkable
+            .as_ref()
+            .expect("devroom needs a walkable grid");
+        assert!(grid1.is_walkable(to_devroom.arrival[0], to_devroom.arrival[1]));
+        assert!(
+            devroom
+                .teleporter_at(to_devroom.arrival[0], to_devroom.arrival[1])
+                .is_none()
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
-use crate::systems::debug_draw::draw_walkable_grid;
+use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
 use crate::systems::scene::{gltf_asset_path, spawn_background};
 use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player, PlayerModel};
 
@@ -267,7 +267,7 @@ fn ui(
         ui.separator();
         walkable_ui(ui, &mut scene);
         ui.separator();
-        save_ui(ui, &scene, current.path, &mut state.status);
+        save_ui(ui, &scene, &current.path, &mut state.status);
     });
 }
 
@@ -506,8 +506,9 @@ fn paint(
     grid.set_walkable(hit.x, hit.y, value);
 }
 
-/// Draws the grid overlay on the ground while editing: bright cells for
-/// walkable, dim for blocked. Same rendering as the F2 debug overlay.
+/// Draws the scene's overlays on the ground while editing: walkable cells
+/// bright, blocked dim, teleporter triggers orange. Same rendering as the
+/// F2 debug overlay.
 fn overlay(
     state: Option<Res<EditorState>>,
     scenes: Res<Assets<Scene>>,
@@ -523,10 +524,10 @@ fn overlay(
     let Some(scene) = current.as_ref().and_then(|c| scenes.get(&c.handle)) else {
         return;
     };
-    let Some(grid) = &scene.walkable else {
-        return;
-    };
-    draw_walkable_grid(&mut gizmos, grid);
+    if let Some(grid) = &scene.walkable {
+        draw_walkable_grid(&mut gizmos, grid);
+    }
+    draw_teleporters(&mut gizmos, &scene.teleporters);
 }
 
 #[cfg(test)]

@@ -21,4 +21,15 @@
     )),
     character_model: None,
     background: None,
+    // Test teleporter: walk right from the spawn point into the strip on
+    // the grid's east edge to jump to room2. Its arrival in room2 is the
+    // world origin, well clear of room2's return trigger.
+    teleporters: [
+        (
+            position: (2.0, 0.0),
+            size: (0.8, 2.0),
+            target: "scenes/room2.scene",
+            arrival: (0.0, 0.0),
+        ),
+    ],
 )

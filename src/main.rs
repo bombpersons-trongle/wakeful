@@ -12,7 +12,7 @@ use bevy::window::WindowResolution;
 use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::scene::Scene;
-use crate::systems::{camera, debug_draw, input, player, scene as scene_loader, world};
+use crate::systems::{camera, debug_draw, input, player, scene as scene_loader, teleport, world};
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
@@ -32,19 +32,25 @@ struct GameCamera;
 #[derive(Component)]
 struct Ground;
 
-/// Sprite spawned for the scene's background image; the editor despawns
-/// and respawns these when the background path changes.
+/// Sprite spawned for the scene's background image; despawned with the
+/// background camera on scene change, and respawned by the editor when
+/// the background path changes.
 #[derive(Component)]
 struct BackgroundSprite;
+
+/// Per-scene camera that draws the background layer; spawned by
+/// `apply_scene` and despawned on scene change.
+#[derive(Component)]
+struct BackgroundCamera;
 
 /// The scene the game is currently running. `load_scene` inserts it with a
 /// handle whose asset loads asynchronously; `apply_scene` polls it until
 /// the file arrives. The path is kept so the editor can save back to the
-/// file the scene was loaded from.
+/// file the scene was loaded from; teleporters update it on scene change.
 #[derive(Resource)]
 struct CurrentScene {
     handle: Handle<Scene>,
-    path: &'static str,
+    path: String,
 }
 
 /// One-shot flag pairing with `CurrentScene`: the bool starts `false` and
@@ -53,6 +59,20 @@ struct CurrentScene {
 /// runs every frame.
 #[derive(Resource)]
 struct SceneApplied(bool);
+
+/// A teleporter was touched: the destination scene file and where the
+/// player appears. `transition_scene` consumes it.
+#[derive(Resource)]
+struct PendingTeleport {
+    target: String,
+    arrival: Vec2,
+}
+
+/// Where the player spawns in the scene being applied, set by
+/// `transition_scene` and consumed by `apply_scene`. Absent on first
+/// load: the player starts at the world origin.
+#[derive(Resource)]
+struct PlayerSpawn(Vec2);
 
 /// Character model queued for the player, held until its glTF finishes
 /// loading; `apply_player_model` removes it once applied.
@@ -87,7 +107,6 @@ fn main() {
                 screen::setup_screen,
                 camera::setup_game_camera,
                 world::spawn_world,
-                player::spawn_player,
                 scene_loader::load_scene,
             )
                 .chain(),
@@ -103,6 +122,15 @@ fn main() {
                 debug_draw::debug_draw_walkables,
             ),
         )
-        .add_systems(FixedUpdate, player::move_player)
+        // Transition before application so a scene whose file is already
+        // cached applies the same frame the teleport lands.
+        .add_systems(
+            Update,
+            scene_loader::transition_scene.before(scene_loader::apply_scene),
+        )
+        .add_systems(
+            FixedUpdate,
+            (player::move_player, teleport::check_teleporters).chain(),
+        )
         .run();
 }
