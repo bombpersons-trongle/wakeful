@@ -1,8 +1,10 @@
+mod dither;
 mod movement;
 mod scene;
 mod screen;
 mod systems;
 
+use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy::world_serialization::WorldAsset;
@@ -60,6 +62,7 @@ fn main() {
             ..default()
         }))
         .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
+        .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(
