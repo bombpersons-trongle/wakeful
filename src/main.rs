@@ -74,6 +74,15 @@ struct PendingTeleport {
 #[derive(Resource)]
 struct PlayerSpawn(Vec2);
 
+/// One armed flag per teleporter in the current scene, rebuilt by
+/// `apply_scene` on every scene application: a teleporter that already
+/// contains the player's spawn point starts disarmed, so arrival regions
+/// only fire after the player leaves and re-enters. Flags beyond the
+/// built length (e.g. teleporters added live in the editor) count as
+/// armed.
+#[derive(Resource)]
+struct TeleporterArmed(Vec<bool>);
+
 /// Character model queued for the player, held until its glTF finishes
 /// loading; `apply_player_model` removes it once applied.
 #[derive(Resource)]

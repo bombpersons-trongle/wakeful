@@ -21,14 +21,15 @@
     )),
     character_model: None,
     background: None,
-    // Returns to devroom; arrival is the world origin, clear of devroom's
-    // trigger, so the player doesn't bounce straight back.
+    // Returns to devroom; its arrival lands inside devroom's east
+    // trigger, so the round trip exercises re-arm: quiet until the
+    // player leaves the region and re-enters.
     teleporters: [
         (
             position: (-2.0, 0.0),
             size: (0.8, 2.0),
             target: "scenes/devroom.scene",
-            arrival: (0.0, 0.0),
+            arrival: (1.8, 0.0),
         ),
     ],
 )

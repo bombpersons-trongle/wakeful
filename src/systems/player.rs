@@ -8,7 +8,9 @@ use crate::scene::Scene;
 use crate::{CurrentScene, Player};
 
 /// Capsule geometry; `PLAYER_Y` keeps it resting on the ground plane.
-const PLAYER_RADIUS: f32 = 0.4;
+/// The radius also drives walkable-grid collision; shipped-scene tests
+/// assert arrivals fit a body of this size.
+pub(crate) const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_HALF_HEIGHT: f32 = 0.5;
 const PLAYER_Y: f32 = PLAYER_RADIUS + PLAYER_HALF_HEIGHT;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);

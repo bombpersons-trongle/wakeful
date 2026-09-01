@@ -54,14 +54,6 @@ impl Teleporter {
     }
 }
 
-impl Scene {
-    /// The first teleporter whose trigger rect contains the world XZ
-    /// position, if any.
-    pub fn teleporter_at(&self, x: f32, z: f32) -> Option<&Teleporter> {
-        self.teleporters.iter().find(|t| t.contains(x, z))
-    }
-}
-
 #[derive(Deserialize, Serialize)]
 pub struct WalkableGrid {
     /// World XZ position of the corner of cell `[0][0]`.
@@ -357,8 +349,8 @@ mod tests {
         assert_eq!(teleporter.size, [2.0, 1.0]);
         assert_eq!(teleporter.target, "scenes/room2.scene");
         assert_eq!(teleporter.arrival, [1.0, 2.0]);
-        assert_eq!(scene.teleporter_at(4.0, 0.0), Some(teleporter));
-        assert_eq!(scene.teleporter_at(0.0, 0.0), None);
+        assert!(teleporter.contains(4.0, 0.0));
+        assert!(!teleporter.contains(0.0, 0.0));
     }
 
     #[test]
@@ -372,7 +364,6 @@ mod tests {
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert!(scene.teleporters.is_empty());
-        assert_eq!(scene.teleporter_at(0.0, 0.0), None);
     }
 
     #[test]
@@ -422,44 +413,15 @@ mod tests {
     }
 
     #[test]
-    fn teleporter_at_prefers_the_first_match() {
-        let scene = Scene {
-            background: None,
-            camera: CameraPose {
-                position: [0.0, 0.0, 0.0],
-                target: [0.0, 0.0, 0.0],
-                fov_degrees: 45.0,
-            },
-            walkable: None,
-            character_model: None,
-            teleporters: vec![
-                Teleporter {
-                    position: [0.0, 0.0],
-                    size: [2.0, 2.0],
-                    target: "scenes/first.scene".into(),
-                    arrival: [0.0, 0.0],
-                },
-                Teleporter {
-                    position: [0.0, 0.0],
-                    size: [4.0, 4.0],
-                    target: "scenes/second.scene".into(),
-                    arrival: [0.0, 0.0],
-                },
-            ],
-        };
-        assert_eq!(
-            scene.teleporter_at(0.0, 0.0).unwrap().target,
-            "scenes/first.scene"
-        );
-    }
-
-    #[test]
     fn the_shipped_teleporter_pair_is_consistent() {
-        // Both halves must parse, and each side's arrival point must be
-        // walkable and clear of the destination's own triggers, or the
-        // player would bounce straight back.
+        // Both halves must parse, and each side's arrival point must sit
+        // inside the destination's trigger region with the player's whole
+        // body on walkable ground: a point that is on the grid but whose
+        // body overhangs its edge leaves the player stuck (constrain
+        // rejects whole moves, it doesn't step out).
         let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
         let room2: Scene = ron::from_str(include_str!("../assets/scenes/room2.scene")).unwrap();
+        let radius = crate::systems::player::PLAYER_RADIUS;
 
         let [to_room2] = &devroom.teleporters[..] else {
             panic!("devroom ships exactly one test teleporter");
@@ -469,12 +431,11 @@ mod tests {
             .walkable
             .as_ref()
             .expect("room2 needs a walkable grid");
-        assert!(grid2.is_walkable(to_room2.arrival[0], to_room2.arrival[1]));
-        assert!(
-            room2
-                .teleporter_at(to_room2.arrival[0], to_room2.arrival[1])
-                .is_none()
-        );
+        assert!(grid2.is_circle_walkable(to_room2.arrival[0], to_room2.arrival[1], radius));
+        let [from_room2] = &room2.teleporters[..] else {
+            panic!("room2 ships exactly one return teleporter");
+        };
+        assert!(from_room2.contains(to_room2.arrival[0], to_room2.arrival[1]));
 
         let [to_devroom] = &room2.teleporters[..] else {
             panic!("room2 ships exactly one return teleporter");
@@ -484,12 +445,8 @@ mod tests {
             .walkable
             .as_ref()
             .expect("devroom needs a walkable grid");
-        assert!(grid1.is_walkable(to_devroom.arrival[0], to_devroom.arrival[1]));
-        assert!(
-            devroom
-                .teleporter_at(to_devroom.arrival[0], to_devroom.arrival[1])
-                .is_none()
-        );
+        assert!(grid1.is_circle_walkable(to_devroom.arrival[0], to_devroom.arrival[1], radius));
+        assert!(to_room2.contains(to_devroom.arrival[0], to_devroom.arrival[1]));
     }
 
     #[test]

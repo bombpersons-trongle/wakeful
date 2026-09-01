@@ -11,7 +11,7 @@ use crate::screen;
 use crate::systems::player;
 use crate::{
     BackgroundCamera, BackgroundSprite, CurrentScene, GameCameraQuery, Ground, PendingTeleport,
-    Player, PlayerModel, PlayerSpawn, SceneApplied,
+    Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed,
 };
 
 /// Camera layer that draws the pre-rendered background image.
@@ -128,6 +128,16 @@ pub fn apply_scene(
     player::spawn_player(&mut commands, &mut meshes, &mut materials, at);
     commands.remove_resource::<PlayerSpawn>();
 
+    // A teleporter already under the player on arrival must not fire
+    // until the player leaves it and re-enters.
+    commands.insert_resource(TeleporterArmed(
+        scene
+            .teleporters
+            .iter()
+            .map(|t| !t.contains(at.x, at.y))
+            .collect(),
+    ));
+
     if let Some(path) = &scene.character_model {
         commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
     }
@@ -227,7 +237,7 @@ mod tests {
     use bevy::tasks::{ComputeTaskPool, IoTaskPool, TaskPool};
 
     use crate::GameCamera;
-    use crate::scene::CameraPose;
+    use crate::scene::{CameraPose, Teleporter};
 
     use super::*;
 
@@ -357,13 +367,33 @@ mod tests {
         assert_eq!(world.resource::<PlayerSpawn>().0, Vec2::new(3.0, 4.0));
     }
 
-    fn world_for_apply(player_spawn: Option<Vec2>) -> World {
+    /// A scene whose teleporter covers exactly the point (3, 4).
+    fn covering_scene() -> Scene {
+        Scene {
+            background: None,
+            camera: CameraPose {
+                position: [0.0, 6.0, 9.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            character_model: None,
+            teleporters: vec![Teleporter {
+                position: [3.0, 4.0],
+                size: [1.0, 1.0],
+                target: "scenes/elsewhere.scene".into(),
+                arrival: [0.0, 0.0],
+            }],
+        }
+    }
+
+    fn world_for_apply(scene: Scene, player_spawn: Option<Vec2>) -> World {
         let mut world = World::new();
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
         world.insert_resource(server);
-        let handle = assets.add(test_scene(None));
+        let handle = assets.add(scene);
         world.insert_resource(assets);
         let mut images = Assets::<Image>::default();
         world.insert_resource(screen::GameImage(images.add(Image::default())));
@@ -383,7 +413,7 @@ mod tests {
 
     #[test]
     fn apply_scene_spawns_the_player_at_the_arrival_point() {
-        let mut world = world_for_apply(Some(Vec2::new(3.0, 4.0)));
+        let mut world = world_for_apply(test_scene(None), Some(Vec2::new(3.0, 4.0)));
         world.run_system_once(apply_scene).unwrap();
         world.flush();
 
@@ -396,12 +426,28 @@ mod tests {
 
     #[test]
     fn the_first_scene_spawns_the_player_at_the_origin() {
-        let mut world = world_for_apply(None);
+        let mut world = world_for_apply(test_scene(None), None);
         world.run_system_once(apply_scene).unwrap();
         world.flush();
 
         let mut players = world.query_filtered::<&Transform, With<Player>>();
         let transform = players.single(&world).unwrap();
         assert_eq!(transform.translation.xz(), Vec2::ZERO);
+    }
+
+    #[test]
+    fn arriving_inside_a_trigger_starts_it_disarmed() {
+        let mut world = world_for_apply(covering_scene(), Some(Vec2::new(3.0, 4.0)));
+        world.run_system_once(apply_scene).unwrap();
+        world.flush();
+        assert!(!world.resource::<TeleporterArmed>().0[0]);
+    }
+
+    #[test]
+    fn arriving_clear_starts_the_trigger_armed() {
+        let mut world = world_for_apply(covering_scene(), Some(Vec2::new(0.0, 0.0)));
+        world.run_system_once(apply_scene).unwrap();
+        world.flush();
+        assert!(world.resource::<TeleporterArmed>().0[0]);
     }
 }
