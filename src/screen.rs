@@ -13,8 +13,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat, T
 use bevy::window::PrimaryWindow;
 
 /// Virtual resolution the whole game is rendered at.
-pub const GAME_WIDTH: u32 = 640;
-pub const GAME_HEIGHT: u32 = 480;
+pub const GAME_WIDTH: u32 = 320;
+pub const GAME_HEIGHT: u32 = 240;
 
 /// Size of the offscreen texture as a window-size vector.
 pub fn game_size() -> UVec2 {
@@ -90,7 +90,10 @@ pub fn resize_present(
         return;
     };
 
-    let size = presented_size(window.physical_size(), game_size()).as_vec2();
+    // Sprite sizes are logical units, so scale from the logical window
+    // size; physical pixels would over-size the image on scaled displays.
+    let logical = UVec2::new(window.width() as u32, window.height() as u32);
+    let size = presented_size(logical, game_size()).as_vec2();
     sprite.custom_size = Some(size);
 }
 
@@ -100,19 +103,19 @@ mod tests {
 
     #[test]
     fn scales_to_exact_multiple() {
-        assert_eq!(integer_scale(UVec2::new(1280, 960), game_size()), 2);
+        assert_eq!(integer_scale(UVec2::new(1280, 960), game_size()), 4);
     }
 
     #[test]
     fn fits_the_smaller_axis() {
-        // width allows 3x but height only 2x
-        assert_eq!(integer_scale(UVec2::new(1920, 1080), game_size()), 2);
+        // width allows 6x but height only 4x
+        assert_eq!(integer_scale(UVec2::new(1920, 1080), game_size()), 4);
     }
 
     #[test]
     fn never_scales_below_one() {
         assert_eq!(integer_scale(UVec2::new(300, 200), game_size()), 1);
-        assert_eq!(integer_scale(UVec2::new(1000, 900), game_size()), 1);
+        assert_eq!(integer_scale(UVec2::new(500, 400), game_size()), 1);
     }
 
     #[test]

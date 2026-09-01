@@ -10,7 +10,7 @@ use serde::Deserialize;
 #[derive(Asset, TypePath, Deserialize)]
 pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
-    /// the game's virtual resolution (640x480), like a pre-rendered FF7 room.
+    /// the game's virtual resolution (320x240), like a pre-rendered FF7 room.
     pub background: Option<String>,
     pub camera: CameraPose,
     pub walkable: Option<WalkableGrid>,
