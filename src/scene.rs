@@ -509,6 +509,7 @@ mod tests {
                 1.0 / 60.0,
             )
             .unwrap()
+            .position
             .expect("the goblin approaches a far player");
         assert!(moved[0] > actor.position[0] && moved[1] < actor.position[1]);
         assert_eq!(
@@ -521,7 +522,8 @@ mod tests {
                     actor.position[1],
                     1.0 / 60.0,
                 )
-                .unwrap(),
+                .unwrap()
+                .position,
             None
         );
     }

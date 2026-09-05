@@ -116,6 +116,9 @@ pub fn apply_scene(
             order: 0,
             ..default()
         },
+        Msaa::Off, // must be explicit: the default is 4x, which would
+        // mismatch the single-sampled game image once a background
+        // sprite gives this camera a depth-bearing 2d pass.
         RenderTarget::Image(game_image.0.clone().into()),
         RenderLayers::layer(BG_LAYER),
     ));

@@ -73,5 +73,6 @@ Contributors work like any outside contributor — no special privileges:
   `movement.rs` is ECS-free and unit tested.
 - Art direction: FF7-style — 3D characters over pre-rendered backgrounds.
   The ground plane is a placeholder until real background art exists.
-- `src/bin/snapshot.rs` renders the scene windowlessly to a PNG, for headless
-  verification of visual changes.
+- `src/bin/snapshot_mac_os.rs` renders the scene windowlessly to a PNG, for
+  headless verification of visual changes. Written for macOS — it doesn't
+  render correctly on every host, so validate before trusting.

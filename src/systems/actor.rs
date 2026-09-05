@@ -5,18 +5,30 @@ use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use rhai::Scope;
 
+use crate::GameCamera;
 use crate::Player;
 use crate::editor::assets_root;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
 use crate::scripts::CompiledScript;
+use crate::systems::bubble;
 use crate::systems::scene::gltf_asset_path;
+
+/// How long a scripted line stays up before closing itself.
+const SAY_TTL_SECS: f32 = 3.0;
+/// Screen pixels between the actor's projected ground point and the
+/// bubble's center, lifting the bubble above the model.
+const SAY_HEADROOM_PX: f32 = 24.0;
 
 /// Marks a scene actor. The optional script runtime is disabled once it
 /// errors, so a broken file can't spam warnings every tick.
 #[derive(Component)]
 pub struct Actor {
     script: Option<ScriptRuntime>,
+    /// The bubble showing the actor's last line, replaced per `say`.
+    bubble: Option<Entity>,
+    /// The line currently in that bubble, to dedupe per-tick repeats.
+    said: Option<String>,
 }
 
 /// A compiled script and its persistent variable scope.
@@ -55,7 +67,11 @@ pub(crate) fn spawn_actors(
     for actor in &scene.actors {
         let script = actor.script.as_deref().and_then(load_script);
         commands.spawn((
-            Actor { script },
+            Actor {
+                script,
+                bubble: None,
+                said: None,
+            },
             ActorModel(assets.load(gltf_asset_path(&actor.model))),
             Transform::from_xyz(actor.position[0], 0.0, actor.position[1])
                 .with_rotation(facing_rotation(toward)),
@@ -108,13 +124,17 @@ pub(crate) fn attach_actor_models(
     }
 }
 
-/// Runs each actor's `on_update` and applies the returned position.
+/// Runs each actor's `on_update`, applies the returned position, and
+/// shows whatever the script `say`-ed as a speech bubble above it.
 /// Actors are not grid-constrained: their scripts are trusted content.
 pub(crate) fn run_actor_scripts(
     mut commands: Commands,
     time: Res<Time>,
     players: Query<&Transform, With<Player>>,
+    cameras: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
     mut actors: ActorQuery,
+    mut bubbles: Query<&mut bubble::SpeechBubble>,
+    bubble_assets: Option<Res<bubble::BubbleAssets>>,
 ) {
     let Ok(player) = players.single() else {
         return;
@@ -134,18 +154,79 @@ pub(crate) fn run_actor_scripts(
             player_z,
             dt,
         ) {
-            Ok(Some([x, z])) => {
-                let direction = Vec2::new(x, z) - Vec2::new(position.x, position.z);
-                transform.translation = Vec3::new(x, 0.0, z);
-                transform.rotation = face_direction(transform.rotation, direction, TURN_SPEED, dt);
+            Ok(tick) => {
+                if let Some([x, z]) = tick.position {
+                    let direction = Vec2::new(x, z) - Vec2::new(position.x, position.z);
+                    transform.translation = Vec3::new(x, 0.0, z);
+                    transform.rotation =
+                        face_direction(transform.rotation, direction, TURN_SPEED, dt);
+                }
+                if !tick.said.is_empty() {
+                    say(
+                        &mut commands,
+                        &cameras,
+                        bubble_assets.as_deref(),
+                        &mut bubbles,
+                        &mut actor,
+                        transform.translation,
+                        tick.said.join(" "),
+                    );
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 warn!("Actor script errored, disabling it: {e}");
                 commands.entity(entity).insert(ScriptBroken);
             }
         }
     }
+}
+
+/// Shows `line` in a timed bubble above the actor's on-screen point.
+/// Repeating the current line keeps the open bubble steady; a new line
+/// replaces it.
+fn say(
+    commands: &mut Commands,
+    cameras: &Query<(&Camera, &GlobalTransform), With<GameCamera>>,
+    assets: Option<&bubble::BubbleAssets>,
+    bubbles: &mut Query<&mut bubble::SpeechBubble>,
+    actor: &mut Actor,
+    at_world: Vec3,
+    line: String,
+) {
+    let (Some(assets), Ok((camera, camera_transform))) = (assets, cameras.single()) else {
+        return;
+    };
+    // Off-screen or behind the camera: the line is dropped this tick;
+    // a still-visible script can say it again.
+    let Ok(screen) = camera.world_to_viewport(camera_transform, at_world) else {
+        return;
+    };
+    // Repeating the line that's already up keeps that bubble steady
+    // instead of restarting its open animation every tick. A bubble
+    // that's closing or gone falls through to a fresh spawn.
+    let steady = match actor.bubble {
+        Some(entity) => bubbles.get(entity).is_ok(),
+        None => false,
+    };
+    if steady && actor.said.as_deref() == Some(line.as_str()) {
+        return;
+    }
+    if let Some(old) = actor.bubble
+        && let Ok(mut old_bubble) = bubbles.get_mut(old)
+    {
+        bubble::dismiss_bubble(&mut old_bubble);
+    }
+    actor.bubble = Some(bubble::spawn_bubble(
+        commands,
+        assets,
+        bubble::BubbleParams {
+            text: line.clone(),
+            at: screen - Vec2::Y * SAY_HEADROOM_PX,
+            tail: Some(Vec2::NEG_Y),
+            ttl: Some(SAY_TTL_SECS),
+        },
+    ));
+    actor.said = Some(line);
 }
 
 #[cfg(test)]
@@ -199,6 +280,8 @@ mod tests {
                     script: CompiledScript::compile(text).unwrap(),
                     scope: Scope::new(),
                 }),
+                bubble: None,
+                said: None,
             },
             Transform::from_xyz(1.0, 0.0, 2.0),
         )
@@ -252,7 +335,11 @@ mod tests {
         let handle = gltfs.add(gltf_with_default_scene());
         world.insert_resource(gltfs);
         world.spawn((
-            Actor { script: None },
+            Actor {
+                script: None,
+                bubble: None,
+                said: None,
+            },
             ActorModel(handle),
             Transform::default(),
         ));
@@ -288,6 +375,138 @@ mod tests {
         // 5 radians of budget turns the nose all the way from -Z to +X.
         let nose = transform.rotation * Vec3::Y;
         assert!(nose.abs_diff_eq(Vec3::X, 1e-4));
+    }
+
+    #[test]
+    fn a_saying_script_spawns_a_timed_bubble_above_the_actor() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        let assets = bubble::test_assets(&mut world);
+        world.insert_resource(assets);
+        world.spawn((Player, Transform::default()));
+        // A targetless camera with pre-seeded render values: eye at the
+        // origin looking -Z, 90-degree square perspective. The actor at
+        // (0, 0, -6) then projects to the viewport center (160, 120).
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: UVec2::new(320, 240),
+            scale_factor: 1.0,
+        });
+        camera.computed.clip_from_view =
+            Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        world.spawn((GameCamera, camera, GlobalTransform::IDENTITY));
+        let (actor, _) = scripted_actor("fn on_update(x, z, px, pz, dt) { say(\"hi\"); }");
+        world.spawn((actor, Transform::from_xyz(0.0, 0.0, -6.0)));
+
+        world.run_system_once(run_actor_scripts).unwrap();
+        world.flush();
+
+        // The actor's tracked bubble is the spawned one, lifted by the
+        // headroom and centered above the projected ground point.
+        let mut actors = world.query::<&Actor>();
+        let shown = actors.single(&world).unwrap().bubble.unwrap();
+        let transform = world.get::<Transform>(shown).unwrap();
+        assert!(
+            transform
+                .translation
+                .abs_diff_eq(Vec3::new(0.0, SAY_HEADROOM_PX, 0.0), 1e-4)
+        );
+    }
+
+    #[test]
+    fn saying_again_replaces_the_previous_bubble() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        let assets = bubble::test_assets(&mut world);
+        world.insert_resource(assets);
+        world.spawn((Player, Transform::default()));
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: UVec2::new(320, 240),
+            scale_factor: 1.0,
+        });
+        camera.computed.clip_from_view =
+            Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        world.spawn((GameCamera, camera, GlobalTransform::IDENTITY));
+        let script = CompiledScript::compile(
+            r#"
+            fn on_update(x, z, px, pz, dt) {
+                if lines < 2 { lines += 1; say("line" + lines); }
+            }
+            "#,
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("lines", 0_i64);
+        world.spawn((
+            Actor {
+                script: Some(ScriptRuntime { script, scope }),
+                bubble: None,
+                said: None,
+            },
+            Transform::from_xyz(0.0, 0.0, -6.0),
+        ));
+
+        world.run_system_once(run_actor_scripts).unwrap();
+        world.flush();
+        let mut actors = world.query::<&Actor>();
+        let first = actors.single(&world).unwrap().bubble.unwrap();
+
+        world.run_system_once(run_actor_scripts).unwrap();
+        world.flush();
+
+        let mut actors = world.query::<&Actor>();
+        let second = actors.single(&world).unwrap().bubble.unwrap();
+        assert_ne!(first, second);
+        // The old bubble is on its way out, not despawned outright.
+        let old = world.get::<bubble::SpeechBubble>(first).unwrap();
+        assert!(!old.is_open());
+        // The new one carries the second line.
+        let children = world.get::<Children>(second).unwrap();
+        let text_entity = children
+            .iter()
+            .find(|&child| world.get::<Text2d>(child).is_some())
+            .unwrap();
+        assert_eq!(world.get::<Text2d>(text_entity).unwrap().0, "line2");
+    }
+
+    #[test]
+    fn repeating_a_line_keeps_the_bubble_steady() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<ColorMaterial>::default());
+        let assets = bubble::test_assets(&mut world);
+        world.insert_resource(assets);
+        world.spawn((Player, Transform::default()));
+        let mut camera = Camera::default();
+        camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
+            physical_size: UVec2::new(320, 240),
+            scale_factor: 1.0,
+        });
+        camera.computed.clip_from_view =
+            Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
+        world.spawn((GameCamera, camera, GlobalTransform::IDENTITY));
+        let (actor, _) = scripted_actor("fn on_update(x, z, px, pz, dt) { say(\"hi\"); }");
+        world.spawn((actor, Transform::from_xyz(0.0, 0.0, -6.0)));
+
+        world.run_system_once(run_actor_scripts).unwrap();
+        world.flush();
+        let mut actors = world.query::<&Actor>();
+        let first = actors.single(&world).unwrap().bubble.unwrap();
+
+        world.run_system_once(run_actor_scripts).unwrap();
+        world.flush();
+
+        let mut actors = world.query::<&Actor>();
+        assert_eq!(actors.single(&world).unwrap().bubble, Some(first));
+        // Exactly one bubble exists: nothing was dismissed or respawned.
+        let mut bubbles = world.query::<&bubble::SpeechBubble>();
+        assert_eq!(bubbles.iter(&world).count(), 1);
     }
 
     #[test]

@@ -10,30 +10,55 @@
 //! }
 //! ```
 //!
-//! World state goes in as arguments, so the sandbox needs no host
-//! functions; a per-actor `Scope` (owned by the caller) persists script
-//! state between ticks. The default engine has no file or network
-//! access, so scripts can only compute.
+//! World state goes in as arguments, so the sandbox has exactly one
+//! host function: `say(text)`, which collects speech and is returned to
+//! the host in the tick result (to show as a speech bubble). There is
+//! no file or network access; scripts can only compute.
+//!
+//! A per-actor `Scope` (owned by the caller) persists script state
+//! between ticks.
+
+use std::sync::{Arc, Mutex, PoisonError};
 
 use rhai::{Dynamic, Engine, Position, Scope};
+
+/// What one script tick produced: where the actor goes and what it
+/// said. Speech is drained from the script's `say` buffer, so it is
+/// per-tick and in call order.
+pub struct Tick {
+    /// `None` to stay put, or the new ground position.
+    pub position: Option<[f32; 2]>,
+    /// Text the script `say`-ed this tick.
+    pub said: Vec<String>,
+}
 
 /// A compiled Rhai script, ready to run against a caller-owned [`Scope`].
 pub struct CompiledScript {
     engine: Engine,
     ast: rhai::AST,
+    /// `say(text)` appends here; drained once per tick.
+    said: Arc<Mutex<Vec<String>>>,
 }
 
 impl CompiledScript {
     /// Compiles script text.
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        let engine = Engine::new();
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let mut engine = Engine::new();
+        let sink = said.clone();
+        engine.register_fn("say", move |line: &str| {
+            sink.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(line.to_owned());
+        });
         let ast = engine.compile(text)?;
-        Ok(Self { engine, ast })
+        Ok(Self { engine, ast, said })
     }
 
-    /// Runs one update tick. `Ok(None)` means the script (or its missing
-    /// `on_update`) wants the actor to stay put; `Ok(Some([x, z]))` is
-    /// the new ground position.
+    /// Runs one update tick. The position is `None` when the script (or
+    /// its missing `on_update`) wants the actor to stay put; `Some([x,
+    /// z])` is the new ground position. `said` carries whatever the
+    /// script `say`-ed this tick.
     pub fn update(
         &self,
         scope: &mut Scope,
@@ -42,7 +67,13 @@ impl CompiledScript {
         player_x: f32,
         player_z: f32,
         dt: f32,
-    ) -> Result<Option<[f32; 2]>, Box<rhai::EvalAltResult>> {
+    ) -> Result<Tick, Box<rhai::EvalAltResult>> {
+        // say() output belongs to the tick that calls it; clear any
+        // residue from a previous tick that errored mid-drain.
+        self.said
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         // rhai computes in f64; pass doubles in and read the pair out.
         let result: Dynamic = self.engine.call_fn(
             scope,
@@ -56,7 +87,14 @@ impl CompiledScript {
                 dt as f64,
             ),
         )?;
-        convert_position(result)
+        let position = convert_position(result)?;
+        let said = std::mem::take(
+            self.said
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut(),
+        );
+        Ok(Tick { position, said })
     }
 }
 
@@ -104,7 +142,7 @@ mod tests {
         .unwrap();
         let mut scope = Scope::new();
         let moved = script.update(&mut scope, 1.0, 2.0, 0.0, 0.0, 0.5).unwrap();
-        assert_eq!(moved, Some([2.0, 2.0]));
+        assert_eq!(moved.position, Some([2.0, 2.0]));
     }
 
     #[test]
@@ -113,9 +151,46 @@ mod tests {
             CompiledScript::compile("fn on_update(x, z, player_x, player_z, dt) { }").unwrap();
         let mut scope = Scope::new();
         assert_eq!(
-            script.update(&mut scope, 1.0, 2.0, 0.0, 0.0, 0.5).unwrap(),
+            script
+                .update(&mut scope, 1.0, 2.0, 0.0, 0.0, 0.5)
+                .unwrap()
+                .position,
             None
         );
+    }
+
+    #[test]
+    fn a_script_can_say_and_the_host_reads_it_back() {
+        let script = CompiledScript::compile(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                say("hello");
+                say("there");
+            }
+            "#,
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        let tick = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(tick.said, ["hello".to_owned(), "there".to_owned()]);
+    }
+
+    #[test]
+    fn said_is_per_tick_so_silence_reads_as_empty() {
+        let script = CompiledScript::compile(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if spoke < 1 { say("once"); spoke = 1; }
+            }
+            "#,
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("spoke", 0_i64);
+        let first = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        let second = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(first.said, ["once".to_owned()]);
+        assert!(second.said.is_empty());
     }
 
     #[test]
@@ -157,8 +232,8 @@ mod tests {
         scope.push("visits", 0_i64);
         let first = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
         let second = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
-        assert_eq!(first, Some([1.0, 0.0]));
-        assert_eq!(second, Some([2.0, 0.0]));
+        assert_eq!(first.position, Some([1.0, 0.0]));
+        assert_eq!(second.position, Some([2.0, 0.0]));
     }
 
     #[test]

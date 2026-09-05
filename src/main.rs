@@ -14,7 +14,7 @@ use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::scene::Scene;
 use crate::systems::{
-    actor, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
+    actor, bubble, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
 };
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
@@ -118,6 +118,7 @@ fn main() {
             (
                 screen::setup_screen,
                 camera::setup_game_camera,
+                bubble::setup,
                 world::spawn_world,
                 scene_loader::load_scene,
             )
@@ -128,10 +129,13 @@ fn main() {
             (
                 input::quit_on_escape,
                 screen::resize_present,
+                screen::validate_post_process_layout,
                 scene_loader::apply_scene,
                 scene_loader::sync_ground,
                 scene_loader::apply_player_model,
                 actor::attach_actor_models,
+                bubble::fit_bubbles,
+                bubble::animate_bubbles,
                 debug_draw::debug_draw_walkables,
             ),
         )

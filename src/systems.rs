@@ -2,6 +2,7 @@
 //! and owns the shared components and resources they operate on.
 
 pub mod actor;
+pub mod bubble;
 pub mod camera;
 pub mod debug_draw;
 pub mod input;
