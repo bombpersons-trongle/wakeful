@@ -3,6 +3,7 @@ mod editor;
 mod movement;
 mod scene;
 mod screen;
+mod scripts;
 mod systems;
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
@@ -12,7 +13,9 @@ use bevy::window::WindowResolution;
 use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::scene::Scene;
-use crate::systems::{camera, debug_draw, input, player, scene as scene_loader, teleport, world};
+use crate::systems::{
+    actor, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
+};
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
@@ -128,6 +131,7 @@ fn main() {
                 scene_loader::apply_scene,
                 scene_loader::sync_ground,
                 scene_loader::apply_player_model,
+                actor::attach_actor_models,
                 debug_draw::debug_draw_walkables,
             ),
         )
@@ -139,7 +143,12 @@ fn main() {
         )
         .add_systems(
             FixedUpdate,
-            (player::move_player, teleport::check_teleporters).chain(),
+            (
+                player::move_player,
+                teleport::check_teleporters,
+                actor::run_actor_scripts,
+            )
+                .chain(),
         )
         .run();
 }

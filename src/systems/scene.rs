@@ -8,6 +8,7 @@ use bevy::prelude::*;
 
 use crate::scene::Scene;
 use crate::screen;
+use crate::systems::actor::{self, Actor};
 use crate::systems::player;
 use crate::{
     BackgroundCamera, BackgroundSprite, CurrentScene, GameCameraQuery, Ground, PendingTeleport,
@@ -44,6 +45,7 @@ pub fn transition_scene(
     backgrounds: Query<Entity, With<BackgroundSprite>>,
     bg_cameras: Query<Entity, With<BackgroundCamera>>,
     players: Query<Entity, With<Player>>,
+    actors: Query<Entity, With<Actor>>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -52,6 +54,7 @@ pub fn transition_scene(
         .iter()
         .chain(bg_cameras.iter())
         .chain(players.iter())
+        .chain(actors.iter())
     {
         commands.entity(entity).despawn();
     }
@@ -144,6 +147,8 @@ pub fn apply_scene(
             .map(|t| !t.contains(at.x, at.y))
             .collect(),
     ));
+
+    actor::spawn_actors(&mut commands, &assets, scene, scene.camera_forward());
 
     if let Some(path) = &scene.character_model {
         commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
@@ -273,6 +278,7 @@ mod tests {
             walkable: None,
             character_model: None,
             teleporters: Vec::new(),
+            actors: Vec::new(),
         }
     }
 
@@ -391,6 +397,7 @@ mod tests {
                 target: "scenes/elsewhere.scene".into(),
                 arrival: [0.0, 0.0],
             }],
+            actors: Vec::new(),
         }
     }
 

@@ -21,6 +21,15 @@
     )),
     character_model: None,
     background: None,
+    // Test actor: the goblin runs scripts/test.rhai, which makes it
+    // trail the player around the room.
+    actors: [
+        (
+            model: "models/goblin.glb",
+            position: (-2.0, 2.0),
+            script: Some("scripts/test.rhai"),
+        ),
+    ],
     // Test teleporter: walk right from the spawn point into the strip on
     // the grid's east edge to jump to room2. Its arrival in room2 lands
     // inside room2's return trigger: re-arm keeps it quiet until the

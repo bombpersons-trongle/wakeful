@@ -35,12 +35,13 @@ const NEW_GRID_CELL: f32 = 1.0;
 const NEW_GRID_COLS: usize = 8;
 const NEW_GRID_ROWS: usize = 8;
 
-/// Where scenes are saved: the asset server's folder. Mirrors the asset
-/// server's root resolution (env override, cargo manifest, or next to the
-/// executable) so saving works no matter how the game is launched.
-const ASSETS_DIR: &str = "assets";
+/// Where asset files live: the asset server's folder. Mirrors the asset
+/// server's root resolution (env override, cargo manifest, or next to
+/// the executable) so file access works no matter how the game is
+/// launched. Shared with actor script loading.
+pub(crate) const ASSETS_DIR: &str = "assets";
 
-fn assets_root() -> PathBuf {
+pub(crate) fn assets_root() -> PathBuf {
     if let Some(root) = std::env::var_os("BEVY_ASSET_ROOT") {
         return PathBuf::from(root);
     }

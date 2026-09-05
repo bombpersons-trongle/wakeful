@@ -14,5 +14,10 @@ bevy_render = { version = "0.19", default-features = false, features = ["gles"] 
 bevy_common_assets = { version = "0.17", features = ["ron"] }
 # In-game scene editor UI.
 bevy_egui = "0.42"
+# Actor scripts: embedded, sandboxed scripting (no file/network access by
+# default); wired to the game by hand since bevy_mod_scripting doesn't
+# support Bevy 0.19 yet. `sync` makes ASTs/Scopes Send+Sync so they can
+# live in components.
+rhai = { version = "1.21", features = ["sync"] }
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
