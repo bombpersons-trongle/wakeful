@@ -1,6 +1,7 @@
 //! Scene actors: a positioned model per actor, optionally driven by a
 //! Rhai script (see [`crate::scripts`] for the contract).
 
+use bevy::ecs::system::SystemParam;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use rhai::Scope;
@@ -13,6 +14,7 @@ use crate::scene::Scene;
 use crate::scripts::CompiledScript;
 use crate::systems::bubble;
 use crate::systems::scene::gltf_asset_path;
+use crate::text::TextAssets;
 
 /// How long a scripted line stays up before closing itself.
 const SAY_TTL_SECS: f32 = 3.0;
@@ -124,6 +126,14 @@ pub(crate) fn attach_actor_models(
     }
 }
 
+/// The optional UI assets speech needs: both resources are absent
+/// until their `setup` systems have run.
+#[derive(SystemParam)]
+pub(crate) struct UiAssets<'w> {
+    bubbles: Option<Res<'w, bubble::BubbleAssets>>,
+    text: Option<Res<'w, TextAssets>>,
+}
+
 /// Runs each actor's `on_update`, applies the returned position, and
 /// shows whatever the script `say`-ed as a speech bubble above it.
 /// Actors are not grid-constrained: their scripts are trusted content.
@@ -134,13 +144,14 @@ pub(crate) fn run_actor_scripts(
     cameras: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
     mut actors: ActorQuery,
     mut bubbles: Query<&mut bubble::SpeechBubble>,
-    bubble_assets: Option<Res<bubble::BubbleAssets>>,
+    ui_assets: UiAssets,
 ) {
     let Ok(player) = players.single() else {
         return;
     };
     let (player_x, player_z) = (player.translation.x, player.translation.z);
     let dt = time.delta_secs();
+    let camera = cameras.single().ok();
     for (entity, mut transform, mut actor) in &mut actors {
         let Some(runtime) = actor.script.as_mut() else {
             continue;
@@ -162,13 +173,20 @@ pub(crate) fn run_actor_scripts(
                         face_direction(transform.rotation, direction, TURN_SPEED, dt);
                 }
                 if !tick.said.is_empty() {
+                    // Lines said off-screen — or with no camera — are
+                    // dropped this tick; a visible script says again.
+                    let at_screen = camera.and_then(|(camera, camera_transform)| {
+                        camera
+                            .world_to_viewport(camera_transform, transform.translation)
+                            .ok()
+                    });
                     say(
                         &mut commands,
-                        &cameras,
-                        bubble_assets.as_deref(),
                         &mut bubbles,
+                        ui_assets.bubbles.as_deref(),
+                        ui_assets.text.as_deref(),
                         &mut actor,
-                        transform.translation,
+                        at_screen,
                         tick.said.join(" "),
                     );
                 }
@@ -181,24 +199,21 @@ pub(crate) fn run_actor_scripts(
     }
 }
 
-/// Shows `line` in a timed bubble above the actor's on-screen point.
-/// Repeating the current line keeps the open bubble steady; a new line
-/// replaces it.
+/// Shows `line` in a timed bubble at the actor's on-screen point.
+/// `None` — off-screen, or no camera — drops the line for this tick;
+/// a still-visible script can say it again. Repeating the current line
+/// keeps the open bubble steady instead of restarting its animation.
 fn say(
     commands: &mut Commands,
-    cameras: &Query<(&Camera, &GlobalTransform), With<GameCamera>>,
-    assets: Option<&bubble::BubbleAssets>,
     bubbles: &mut Query<&mut bubble::SpeechBubble>,
+    assets: Option<&bubble::BubbleAssets>,
+    text_assets: Option<&TextAssets>,
     actor: &mut Actor,
-    at_world: Vec3,
+    at_screen: Option<Vec2>,
     line: String,
 ) {
-    let (Some(assets), Ok((camera, camera_transform))) = (assets, cameras.single()) else {
-        return;
-    };
-    // Off-screen or behind the camera: the line is dropped this tick;
-    // a still-visible script can say it again.
-    let Ok(screen) = camera.world_to_viewport(camera_transform, at_world) else {
+    let (Some(assets), Some(text_assets), Some(at_screen)) = (assets, text_assets, at_screen)
+    else {
         return;
     };
     // Repeating the line that's already up keeps that bubble steady
@@ -219,9 +234,10 @@ fn say(
     actor.bubble = Some(bubble::spawn_bubble(
         commands,
         assets,
+        text_assets,
         bubble::BubbleParams {
             text: line.clone(),
-            at: screen - Vec2::Y * SAY_HEADROOM_PX,
+            at: at_screen - Vec2::Y * SAY_HEADROOM_PX,
             tail: Some(Vec2::NEG_Y),
             ttl: Some(SAY_TTL_SECS),
         },
@@ -234,6 +250,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::text;
     use bevy::asset::{AssetServer, AssetServerMode, UnapprovedPathMode, io::AssetSourceBuilders};
     use bevy::ecs::system::RunSystemOnce;
     use bevy::platform::collections::HashMap;
@@ -385,6 +402,7 @@ mod tests {
         world.insert_resource(Assets::<ColorMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
+        world.insert_resource(text::test_assets());
         world.spawn((Player, Transform::default()));
         // A targetless camera with pre-seeded render values: eye at the
         // origin looking -Z, 90-degree square perspective. The actor at
@@ -423,6 +441,7 @@ mod tests {
         world.insert_resource(Assets::<ColorMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
+        world.insert_resource(text::test_assets());
         world.spawn((Player, Transform::default()));
         let mut camera = Camera::default();
         camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {
@@ -482,6 +501,7 @@ mod tests {
         world.insert_resource(Assets::<ColorMaterial>::default());
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
+        world.insert_resource(text::test_assets());
         world.spawn((Player, Transform::default()));
         let mut camera = Camera::default();
         camera.computed.target_info = Some(bevy::camera::RenderTargetInfo {

@@ -39,6 +39,9 @@ mod screen;
 #[path = "../systems/bubble.rs"]
 mod bubble;
 
+#[path = "../text.rs"]
+mod text;
+
 /// Handle to the texture the game camera renders into.
 use screen::GameImage;
 
@@ -91,7 +94,10 @@ fn main() {
         .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(16)))
         .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
         .add_observer(on_captured(output))
-        .add_systems(Startup, (setup_scene, bubble::setup, spawn_bubble).chain())
+        .add_systems(
+            Startup,
+            (setup_scene, text::setup, bubble::setup, spawn_bubble).chain(),
+        )
         .add_systems(
             Update,
             (
@@ -164,10 +170,15 @@ fn setup_scene(
 
 /// Spawns one open-ended bubble over the scene, so the snapshot shows
 /// the box, the tail, and the text together.
-fn spawn_bubble(mut commands: Commands, assets: Res<bubble::BubbleAssets>) {
+fn spawn_bubble(
+    mut commands: Commands,
+    assets: Res<bubble::BubbleAssets>,
+    text_assets: Res<text::TextAssets>,
+) {
     bubble::spawn_bubble(
         &mut commands,
         &assets,
+        &text_assets,
         bubble::BubbleParams {
             text: "Over here!".into(),
             at: Vec2::new(screen::GAME_WIDTH as f32 / 2.0, 70.0),

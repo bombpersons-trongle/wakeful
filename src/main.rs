@@ -5,6 +5,7 @@ mod scene;
 mod screen;
 mod scripts;
 mod systems;
+mod text;
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
@@ -118,6 +119,7 @@ fn main() {
             (
                 screen::setup_screen,
                 camera::setup_game_camera,
+                text::setup,
                 bubble::setup,
                 world::spawn_world,
                 scene_loader::load_scene,

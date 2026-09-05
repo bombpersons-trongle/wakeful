@@ -12,6 +12,7 @@ use bevy::prelude::*;
 use bevy::text::TextLayoutInfo;
 
 use crate::screen::{GAME_HEIGHT, GAME_WIDTH, UI_LAYER};
+use crate::text::{self, TextAssets};
 
 /// Draw order inside a bubble, back to front: black border box, black
 /// tail, white fill box, white tail inset, text on top.
@@ -36,8 +37,6 @@ const TAIL_HALF_W: f32 = 3.0;
 const TAIL_OVERLAP: f32 = 2.0;
 const OPEN_SECS: f32 = 0.12;
 const CLOSE_SECS: f32 = 0.08;
-/// Placeholder until a pixel font lands in assets/fonts.
-const FONT_SIZE: f32 = 9.0;
 /// Small but nonzero, so the animation never produces a degenerate
 /// transform.
 const MIN_SCALE: f32 = 1e-3;
@@ -166,6 +165,7 @@ pub(crate) fn test_assets(world: &mut World) -> BubbleAssets {
 pub(crate) fn spawn_bubble(
     commands: &mut Commands,
     assets: &BubbleAssets,
+    text_assets: &TextAssets,
     params: BubbleParams,
 ) -> Entity {
     let tail = params
@@ -175,13 +175,11 @@ pub(crate) fn spawn_bubble(
     // RenderLayers doesn't propagate to children, and the UI camera
     // only looks at UI_LAYER — every renderable child needs it.
     let layers = RenderLayers::layer(UI_LAYER);
+    let (text2d, text_font) = text::pixel_text(params.text, text_assets);
     let text = commands
         .spawn((
-            Text2d::new(params.text),
-            TextFont {
-                font_size: FontSize::Px(FONT_SIZE),
-                ..default()
-            },
+            text2d,
+            text_font,
             TextColor(Color::BLACK),
             Transform::from_xyz(0.0, 0.0, Z_TEXT),
             layers.clone(),
@@ -408,10 +406,12 @@ mod tests {
 
     fn spawn_test_bubble(world: &mut World, tail: Option<Vec2>) -> Entity {
         let assets = bubble_assets(world);
+        let text_assets = text::test_assets();
         let mut commands = world.commands();
         let entity = spawn_bubble(
             &mut commands,
             &assets,
+            &text_assets,
             BubbleParams {
                 text: "hello".into(),
                 at: Vec2::new(160.0, 120.0),
@@ -523,10 +523,12 @@ mod tests {
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
         let assets = bubble_assets(&mut world);
+        let text_assets = text::test_assets();
         let mut commands = world.commands();
         let entity = spawn_bubble(
             &mut commands,
             &assets,
+            &text_assets,
             BubbleParams {
                 text: "timed".into(),
                 at: Vec2::new(160.0, 120.0),
