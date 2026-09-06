@@ -1,7 +1,18 @@
 // Global UI config. Colors are (r, g, b, a) floats; the bubble fill is
 // a gradient between the four corners. Defaults match the classic
 // white box with black text.
+//
+// Display effects: the PSX dither pass and the CRT scanline/mask/
+// vignette pass over the presented picture. Set `enabled: false` to
+// turn one off; the strengths tune intensity (0 = invisible).
 (
+    dither: (enabled: true),
+    crt: (
+        enabled: true,
+        scanline: 0.35,
+        mask: 0.25,
+        vignette: 0.30,
+    ),
     bubble: (
         top_left: (1.0, 1.0, 1.0, 1.0),
         top_right: (1.0, 1.0, 1.0, 1.0),

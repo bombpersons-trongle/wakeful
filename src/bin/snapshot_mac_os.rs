@@ -29,6 +29,12 @@ use bevy::window::{ExitCondition, WindowPlugin};
 #[path = "../dither.rs"]
 mod dither;
 
+// screen.rs's setup_screen references the display module, so it must be
+// declared here too; the present camera itself doesn't exist headless.
+#[allow(dead_code)]
+#[path = "../display.rs"]
+mod display;
+
 // Shares the virtual-resolution target and the speech-bubble pipeline
 // with the main game binary. The present-camera half of screen.rs only
 // matters in the windowed game, hence the allow.

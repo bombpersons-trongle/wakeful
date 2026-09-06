@@ -1,3 +1,4 @@
+mod display;
 mod dither;
 mod editor;
 mod movement;
@@ -24,12 +25,12 @@ use std::path::Path;
 /// display refresh rate or frame timing jitter.
 const FIXED_HZ: f64 = 60.0;
 
-/// Loads the global UI config into the theme resource bubbles style
-/// themselves from; runs before `bubble::setup` in the startup chain.
+/// Loads the global UI config into the resources that style themselves
+/// from it; runs before `bubble::setup` in the startup chain.
 fn load_ui_config(mut commands: Commands) {
-    commands.insert_resource(bubble::BubbleTheme::from_file(
-        &Path::new(editor::assets_root().as_os_str()).join("ui.ron"),
-    ));
+    let path = Path::new(editor::assets_root().as_os_str()).join("ui.ron");
+    commands.insert_resource(bubble::BubbleTheme::from_file(&path));
+    commands.insert_resource(display::DisplaySettings::from_file(&path));
 }
 
 /// Marks the player actor; movement and model-swap systems target this
@@ -121,6 +122,7 @@ fn main() {
         }))
         .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
         .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
+        .add_plugins(FullscreenMaterialPlugin::<display::CrtMaterial>::default())
         .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
         .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
@@ -144,6 +146,7 @@ fn main() {
                 input::quit_on_escape,
                 screen::resize_present,
                 screen::validate_post_process_layout,
+                display::sync_display_effects,
                 bubble::dismiss_on_confirm,
                 bubble::sync_theme,
                 scene_loader::apply_scene,
