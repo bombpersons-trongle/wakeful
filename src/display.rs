@@ -2,10 +2,11 @@
 //! settings both fullscreen effects read from `assets/ui.ron`.
 //!
 //! [`CrtMaterial`] runs on the present camera — after the finished
-//! game image is blitted to the window — so scanlines, the RGB mask,
-//! and the vignette cover the upscaled picture like a tube showing a
-//! 240p signal. The effects are periodic in virtual-pixel space (see
-//! the shader docs), so window resizes can't distort the pattern.
+//! game image is blitted to the window — so the signal bleed,
+//! scanlines, RGB mask, and vignette cover the upscaled picture like
+//! a tube showing a 240p signal. The effects are periodic in
+//! virtual-pixel space (see the shader docs), so window resizes can't
+//! distort the pattern.
 //!
 //! [`DisplaySettings`] is the parsed `ui.ron` section;
 //! [`sync_display_effects`] carries it into the live materials. Barrel
@@ -40,15 +41,17 @@ fn parse_config(text: &str) -> Result<DisplayConfig, ron::error::SpannedError> {
 
 /// Tuned default CRT intensity: visible structure without crushing
 /// brightness. Also the per-field fallbacks for partial ui.ron sections.
+const TUNED_BLEED: f32 = 0.5;
 const TUNED_SCANLINE: f32 = 0.35;
 const TUNED_MASK: f32 = 0.25;
 const TUNED_VIGNETTE: f32 = 0.30;
 
-/// CRT display simulation for the window frame: scanline depth, RGB
-/// mask depth, and vignette strength. All-zero strengths render the
-/// frame untouched — that is how "CRT off" is expressed.
+/// CRT display simulation for the window frame: signal bleed, scanline
+/// depth, RGB mask depth, and vignette strength. All-zero strengths
+/// render the frame untouched — that is how "CRT off" is expressed.
 #[derive(Component, ExtractComponent, Clone, Copy, Debug, ShaderType, Default, PartialEq)]
 pub(crate) struct CrtMaterial {
+    pub bleed: f32,
     pub scanline: f32,
     pub mask: f32,
     pub vignette: f32,
@@ -76,6 +79,7 @@ impl FullscreenMaterial for CrtMaterial {
 /// Gentle default CRT settings.
 pub(crate) fn tuned_crt() -> CrtMaterial {
     CrtMaterial {
+        bleed: TUNED_BLEED,
         scanline: TUNED_SCANLINE,
         mask: TUNED_MASK,
         vignette: TUNED_VIGNETTE,
@@ -88,6 +92,7 @@ pub(crate) fn tuned_crt() -> CrtMaterial {
 pub(crate) struct DisplaySettings {
     pub dither_enabled: bool,
     pub crt_enabled: bool,
+    pub bleed: f32,
     pub scanline: f32,
     pub mask: f32,
     pub vignette: f32,
@@ -98,6 +103,7 @@ impl Default for DisplaySettings {
         Self {
             dither_enabled: true,
             crt_enabled: true,
+            bleed: TUNED_BLEED,
             scanline: TUNED_SCANLINE,
             mask: TUNED_MASK,
             vignette: TUNED_VIGNETTE,
@@ -121,12 +127,18 @@ struct DitherSection {
 struct CrtSection {
     #[serde(default = "default_enabled")]
     enabled: bool,
+    #[serde(default = "default_bleed")]
+    bleed: f32,
     #[serde(default = "default_scanline")]
     scanline: f32,
     #[serde(default = "default_mask")]
     mask: f32,
     #[serde(default = "default_vignette")]
     vignette: f32,
+}
+
+fn default_bleed() -> f32 {
+    TUNED_BLEED
 }
 
 fn default_scanline() -> f32 {
@@ -156,6 +168,7 @@ impl From<CrtSection> for CrtMaterial {
     fn from(section: CrtSection) -> Self {
         if section.enabled {
             CrtMaterial {
+                bleed: section.bleed,
                 scanline: section.scanline,
                 mask: section.mask,
                 vignette: section.vignette,
@@ -192,6 +205,7 @@ impl DisplaySettings {
         }
         if let Some(crt) = config.crt {
             settings.crt_enabled = crt.enabled;
+            settings.bleed = crt.bleed;
             settings.scanline = crt.scanline;
             settings.mask = crt.mask;
             settings.vignette = crt.vignette;
@@ -222,6 +236,7 @@ pub(crate) fn sync_display_effects(
 
     let wanted_crt = if settings.crt_enabled {
         CrtMaterial {
+            bleed: settings.bleed,
             scanline: settings.scanline,
             mask: settings.mask,
             vignette: settings.vignette,
@@ -256,6 +271,7 @@ mod tests {
         assert_eq!(
             tuned_crt(),
             CrtMaterial {
+                bleed: s.bleed,
                 scanline: s.scanline,
                 mask: s.mask,
                 vignette: s.vignette,
@@ -294,11 +310,12 @@ mod tests {
     fn sections_are_read_independently() {
         let path = temp_config(
             "dither-off",
-            "(dither: (enabled: false), crt: (enabled: true, scanline: 0.5, mask: 0.1, vignette: 0.2))",
+            "(dither: (enabled: false), crt: (enabled: true, bleed: 0.4, scanline: 0.5, mask: 0.1, vignette: 0.2))",
         );
         let s = DisplaySettings::from_file(&path);
         assert!(!s.dither_enabled);
         assert!(s.crt_enabled);
+        assert_eq!(s.bleed, 0.4);
         assert_eq!(s.scanline, 0.5);
         assert_eq!(s.mask, 0.1);
         assert_eq!(s.vignette, 0.2);
@@ -310,6 +327,7 @@ mod tests {
         let path = temp_config("partial-crt", "(crt: (scanline: 0.6))");
         let s = DisplaySettings::from_file(&path);
         assert!(s.crt_enabled);
+        assert_eq!(s.bleed, TUNED_BLEED);
         assert_eq!(s.scanline, 0.6);
         assert_eq!(s.mask, TUNED_MASK);
         assert_eq!(s.vignette, TUNED_VIGNETTE);
@@ -337,6 +355,7 @@ mod tests {
     fn sync_writes_crt_strengths_from_settings() {
         let mut world = World::new();
         world.insert_resource(DisplaySettings {
+            bleed: 0.7,
             scanline: 0.5,
             mask: 0.1,
             vignette: 0.2,
@@ -349,6 +368,7 @@ mod tests {
         assert_eq!(
             *pass,
             CrtMaterial {
+                bleed: 0.7,
                 scanline: 0.5,
                 mask: 0.1,
                 vignette: 0.2,
