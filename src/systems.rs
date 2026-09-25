@@ -10,3 +10,4 @@ pub mod player;
 pub mod scene;
 pub mod teleport;
 pub mod world;
+pub mod world_script;
