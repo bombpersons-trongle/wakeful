@@ -11,6 +11,7 @@
 //!
 //! The scene here mirrors `main.rs`; if it grows, move shared scene setup
 //! into a common module instead of duplicating more of it.
+#![allow(dead_code)]
 
 use std::time::{Duration, Instant};
 
@@ -26,8 +27,14 @@ use bevy::sprite_render::Material2dPlugin;
 use bevy::window::{ExitCondition, WindowPlugin};
 
 // Shares the dither material with the main game binary.
+#[path = "../assets.rs"]
+mod assets;
+
 #[path = "../dither.rs"]
 mod dither;
+
+#[path = "../input.rs"]
+mod input;
 
 // screen.rs's setup_screen references the display module, so it must be
 // declared here too; the present camera itself doesn't exist headless.

@@ -7,7 +7,8 @@ use std::path::Path;
 use bevy::prelude::*;
 use rhai::Scope;
 
-use crate::editor::assets_root;
+use crate::assets::assets_root;
+use crate::input::{InputHandle, InputManager};
 use crate::scripts::{ScriptBroken, WorldScript as WorldScriptRuntime, compile_script_file};
 use crate::systems::party::Party;
 
@@ -24,14 +25,18 @@ pub(crate) struct WorldScript {
 }
 
 /// Startup: compiles every `.rhai` file in the world scripts folder.
-pub(crate) fn startup(mut commands: Commands) {
-    spawn_world_scripts(&mut commands, &assets_root().join(WORLD_SCRIPTS_DIR));
+pub(crate) fn startup(mut commands: Commands, input: Res<InputManager>) {
+    spawn_world_scripts(
+        &mut commands,
+        &assets_root().join(WORLD_SCRIPTS_DIR),
+        &input.handle(),
+    );
 }
 
 /// Compiles every `.rhai` file in `dir` into a world script entity, in
 /// path order. A missing or empty dir means zero world scripts, which
 /// is fine.
-fn spawn_world_scripts(commands: &mut Commands, dir: &Path) {
+fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -45,7 +50,10 @@ fn spawn_world_scripts(commands: &mut Commands, dir: &Path) {
         .collect();
     paths.sort();
     for path in paths {
-        let Some(runtime) = compile_script_file(&path, "World", WorldScriptRuntime::compile) else {
+        let handle = input.clone();
+        let Some(runtime) = compile_script_file(&path, "World", move |text| {
+            WorldScriptRuntime::compile_with_handle(text, handle.clone())
+        }) else {
             continue;
         };
         commands.spawn((WorldScript {
@@ -124,7 +132,9 @@ mod tests {
         ]);
 
         let mut world = World::new();
-        spawn_world_scripts(&mut world.commands(), &dir.0);
+        world.insert_resource(crate::input::InputManager::standard());
+        let input = world.resource::<crate::input::InputManager>().handle();
+        spawn_world_scripts(&mut world.commands(), &dir.0, &input);
         world.flush();
 
         let mut scripts = world.query::<&WorldScript>();
@@ -146,7 +156,13 @@ mod tests {
     #[test]
     fn a_missing_folder_means_zero_world_scripts() {
         let mut world = World::new();
-        spawn_world_scripts(&mut world.commands(), Path::new("/nonexistent/wakeful"));
+        world.insert_resource(crate::input::InputManager::standard());
+        let input = world.resource::<crate::input::InputManager>().handle();
+        spawn_world_scripts(
+            &mut world.commands(),
+            Path::new("/nonexistent/wakeful"),
+            &input,
+        );
         world.flush();
 
         let mut scripts = world.query::<&WorldScript>();

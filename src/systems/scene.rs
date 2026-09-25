@@ -6,6 +6,7 @@ use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use rhai::Scope;
 
+use crate::input::InputManager;
 use crate::movement::facing_rotation;
 use crate::scene::Scene;
 use crate::screen;
@@ -112,6 +113,7 @@ pub fn apply_scene(
     applied: Option<ResMut<SceneApplied>>,
     spawn: Option<Res<PlayerSpawn>>,
     mut players: Query<&mut Transform, With<Player>>,
+    input: Res<InputManager>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -189,11 +191,21 @@ pub fn apply_scene(
             .collect(),
     ));
 
-    actor::spawn_actors(&mut commands, &assets, scene, scene.camera_forward());
+    actor::spawn_actors(
+        &mut commands,
+        &assets,
+        scene,
+        scene.camera_forward(),
+        &input.handle(),
+    );
 
     // The scene's script, if the file declares one; run_scene_scripts
     // fires its on_enter on the first tick after this.
-    if let Some(runtime) = scene.script.as_deref().and_then(SceneScriptRuntime::load) {
+    if let Some(runtime) = scene
+        .script
+        .as_deref()
+        .and_then(|path| SceneScriptRuntime::load(path, &input.handle()))
+    {
         commands.spawn((SceneScript {
             runtime,
             scope: Scope::new(),
@@ -461,6 +473,7 @@ mod tests {
 
     fn world_for_apply(scene: Scene, player_spawn: Option<Vec2>) -> World {
         let mut world = World::new();
+        world.insert_resource(crate::input::InputManager::standard());
         world.insert_resource(crate::systems::party::Party::default());
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();

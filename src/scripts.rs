@@ -20,12 +20,15 @@
 //! `party_leader(id)` — because recruiting a member by talking to an
 //! NPC is an actor-script move, a cutscene splitting the party is a
 //! scene-script move, and menu-driven leader picks are world-script
-//! moves. Actors additionally get `say(text)` and `say(text, opts)` —
-//! collecting a line (with placement, timing, and wait options) to show
-//! as a speech bubble — and `waiting()`, which reports whether the
-//! actor's wait-mode bubble is still open, plus `emote(name)` to play
-//! one of the model's one-shot clips. There is no file or network
-//! access; scripts can only compute.
+//! moves. All tiers also read the input manager: `pressed(name)`,
+//! `just_pressed(name)`, `just_released(name)`, and `axis(name)` ask about PlayStation-named
+//! actions ("cross", "triangle", "left_stick_x") as bound by
+//! `assets/input.ron`. Actors additionally get `say(text)` and
+//! `say(text, opts)` — collecting a line (with placement, timing, and
+//! wait options) to show as a speech bubble — and `waiting()`, which
+//! reports whether the actor's wait-mode bubble is still open, plus
+//! `emote(name)` to play one of the model's one-shot clips. There is
+//! no file or network access; scripts can only compute.
 //!
 //! Each runtime is called with a caller-owned [`Scope`] that persists
 //! script state between calls.
@@ -36,6 +39,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use bevy::log::warn;
 use bevy::prelude::Component;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
+
+use crate::input::InputHandle;
 
 /// What an actor's `say` call produced: the line plus how it should be
 /// shown.
@@ -129,11 +134,10 @@ impl CompiledScript {
 
 /// Reads and compiles a tier script file: `None` (after a warning) when
 /// unreadable or non-compiling, so content runs without the script.
-pub(crate) fn compile_script_file<T>(
-    path: &Path,
-    tier: &str,
-    compile: fn(&str) -> Result<T, rhai::ParseError>,
-) -> Option<T> {
+pub(crate) fn compile_script_file<T, F>(path: &Path, tier: &str, compile: F) -> Option<T>
+where
+    F: Fn(&str) -> Result<T, rhai::ParseError>,
+{
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) => {
@@ -157,12 +161,11 @@ pub(crate) fn compile_script_file<T>(
 }
 
 /// Loads a script from the assets folder by its relative path.
-fn load_script_file<T>(
-    path: &str,
-    tier: &str,
-    compile: fn(&str) -> Result<T, rhai::ParseError>,
-) -> Option<T> {
-    compile_script_file(&crate::editor::assets_root().join(path), tier, compile)
+fn load_script_file<T, F>(path: &str, tier: &str, compile: F) -> Option<T>
+where
+    F: Fn(&str) -> Result<T, rhai::ParseError>,
+{
+    compile_script_file(&crate::assets::assets_root().join(path), tier, compile)
 }
 
 /// Registers the party mutators every tier shares: calls append to the
@@ -194,6 +197,60 @@ fn register_party_api(engine: &mut Engine, sink: &Arc<Mutex<Vec<PartyCommand>>>)
     });
 }
 
+/// Registers the input readers every tier shares: name-based queries
+/// against the manager's shared state; unknown names are strict errors
+/// so typos surface instead of silently reading false.
+fn register_input_api(engine: &mut Engine, input: &InputHandle) {
+    let pressed = input.clone();
+    engine.register_fn(
+        "pressed",
+        move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let state = pressed.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .pressed_by_name(name)
+                .ok_or_else(|| unknown_action(name))
+        },
+    );
+    let just_pressed = input.clone();
+    engine.register_fn(
+        "just_pressed",
+        move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let state = just_pressed.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .just_pressed_by_name(name)
+                .ok_or_else(|| unknown_action(name))
+        },
+    );
+    let just_released = input.clone();
+    engine.register_fn(
+        "just_released",
+        move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let state = just_released.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .just_released_by_name(name)
+                .ok_or_else(|| unknown_action(name))
+        },
+    );
+    let axis = input.clone();
+    engine.register_fn(
+        "axis",
+        move |name: &str| -> Result<f64, Box<rhai::EvalAltResult>> {
+            let state = axis.lock().unwrap_or_else(PoisonError::into_inner);
+            state
+                .axis_by_name(name)
+                .map(|v| v as f64)
+                .ok_or_else(|| unknown_action(name))
+        },
+    );
+}
+
+fn unknown_action(name: &str) -> Box<rhai::EvalAltResult> {
+    Box::new(rhai::EvalAltResult::ErrorVariableNotFound(
+        format!("input action {name}"),
+        Position::NONE,
+    ))
+}
+
 /// The actor tier's runtime: compiled script plus the `say`/`waiting`
 /// bridges to the host.
 pub struct ActorScript {
@@ -210,13 +267,23 @@ pub struct ActorScript {
 
 impl ActorScript {
     /// Compiles an actor script.
+    /// Compiles an actor script without a live input manager: the
+    /// input functions read a detached, never-pressed state. Test-only;
+    /// the game loads via [`Self::load`].
+    #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
+        Self::compile_with_handle(text, crate::input::detached())
+    }
+
+    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
         let said = Arc::new(Mutex::new(Vec::new()));
         let emote = Arc::new(Mutex::new(None));
         let party = Arc::new(Mutex::new(Vec::new()));
         let waiting = Arc::new(Mutex::new(false));
         let party_sink = party.clone();
+        let input_sink = input.clone();
         let script = CompiledScript::compile(text, |engine| {
+            register_input_api(engine, &input_sink);
             register_party_api(engine, &party_sink);
             let sink = said.clone();
             engine.register_fn("say", move |line: &str| {
@@ -258,9 +325,12 @@ impl ActorScript {
 
     /// Loads an actor script from the assets folder: `None` (after a
     /// warning) when unreadable or non-compiling, so the actor runs
-    /// without it.
-    pub fn load(path: &str) -> Option<Self> {
-        load_script_file(path, "Actor", Self::compile)
+    /// without it. `input` is the manager's shared state handle.
+    pub fn load(path: &str, input: &InputHandle) -> Option<Self> {
+        let handle = input.clone();
+        load_script_file(path, "Actor", move |text| {
+            Self::compile_with_handle(text, handle.clone())
+        })
     }
 
     /// Tells the script whether the actor's wait-mode bubble is still
@@ -335,12 +405,20 @@ pub struct SceneScript {
 }
 
 impl SceneScript {
-    /// Compiles a scene script.
+    /// Compiles a scene script without a live input manager (tests,
+    /// contract checks); the game loads via [`Self::load`].
+    #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
+        Self::compile_with_handle(text, crate::input::detached())
+    }
+
+    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
+        let input_sink = input.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
+                register_input_api(engine, &input_sink);
                 register_party_api(engine, &party_sink);
             })?,
             party,
@@ -350,8 +428,11 @@ impl SceneScript {
     /// Loads a scene script from the assets folder: `None` (after a
     /// warning) when unreadable or non-compiling, so the scene runs
     /// without it.
-    pub fn load(path: &str) -> Option<Self> {
-        load_script_file(path, "Scene", Self::compile)
+    pub fn load(path: &str, input: &InputHandle) -> Option<Self> {
+        let handle = input.clone();
+        load_script_file(path, "Scene", move |text| {
+            Self::compile_with_handle(text, handle.clone())
+        })
     }
 
     /// Runs `on_enter(player_x, player_z)` once per scene application.
@@ -419,12 +500,20 @@ pub struct WorldScript {
 }
 
 impl WorldScript {
-    /// Compiles a world script.
+    /// Compiles a world script without a live input manager (tests,
+    /// contract checks); the game loads via [`Self::load`].
+    #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
+        Self::compile_with_handle(text, crate::input::detached())
+    }
+
+    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
+        let input_sink = input.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
+                register_input_api(engine, &input_sink);
                 register_party_api(engine, &party_sink);
             })?,
             party,
@@ -835,6 +924,54 @@ mod tests {
     }
 
     #[test]
+    fn scripts_read_the_shared_input_state() {
+        use crate::input::{InputManager, PadAxis, PadButton};
+
+        let manager = InputManager::standard();
+        manager
+            .handle()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .inject(
+                &[PadButton::Triangle],
+                &[PadButton::Triangle],
+                &[(PadAxis::LeftStickX, 0.8)],
+            );
+
+        let script = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if just_pressed("triangle") { opened = 1; }
+                if pressed("triangle") { held += 1; }
+                stick = axis("left_stick_x");
+            }
+            "#,
+            manager.handle(),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("opened", 0_i64);
+        scope.push("held", 0_i64);
+        scope.push("stick", 0.0_f64);
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<i64>("opened"), Some(1));
+        assert_eq!(scope.get_value::<i64>("held"), Some(1));
+        assert_eq!(scope.get_value::<f64>("stick"), Some(0.8_f32 as f64));
+
+        // Unknown action names are strict errors, not silent falses.
+        let script = ActorScript::compile_with_handle(
+            r#"fn on_update(x, z, player_x, player_z, dt) { bogused = pressed("south"); }"#,
+            manager.handle(),
+        )
+        .unwrap();
+        assert!(
+            script
+                .update(&mut Scope::new(), 0.0, 0.0, 0.0, 0.0, 0.5)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn an_emote_request_reaches_the_tick_and_the_last_call_wins() {
         let script = ActorScript::compile(
             r#"
@@ -912,7 +1049,8 @@ mod tests {
 
     #[test]
     fn load_reads_a_shipped_script_and_missing_paths_warn_to_none() {
-        assert!(ActorScript::load("scripts/test.rhai").is_some());
-        assert!(ActorScript::load("scripts/does-not-exist.rhai").is_none());
+        let input = crate::input::detached();
+        assert!(ActorScript::load("scripts/test.rhai", &input).is_some());
+        assert!(ActorScript::load("scripts/does-not-exist.rhai", &input).is_none());
     }
 }

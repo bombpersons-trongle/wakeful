@@ -1,0 +1,27 @@
+// Input bindings: which physical inputs fire which action.
+//
+// Actions are PlayStation-labeled (the game's internal vocabulary);
+// values are bevy key names ("KeyZ", "ArrowUp"), mouse buttons
+// ("MouseLeft"), or pad buttons ("Cross"). Entries left out fall back
+// to the built-in defaults below — delete this file to restore them.
+
+(
+    buttons: {
+        cross: ["KeyZ", "Enter", "Cross"],
+        circle: ["KeyX", "Circle"],
+        triangle: ["KeyI", "Triangle"],
+        square: ["KeyC", "Square"],
+        dpad_up: ["KeyW", "ArrowUp", "DPadUp"],
+        dpad_down: ["KeyS", "ArrowDown", "DPadDown"],
+        dpad_left: ["KeyA", "ArrowLeft", "DPadLeft"],
+        dpad_right: ["KeyD", "ArrowRight", "DPadRight"],
+        l1: ["KeyQ", "L1"],
+        r1: ["KeyE", "R1"],
+        l2: ["L2"],
+        r2: ["ShiftLeft", "ShiftRight", "R2"],
+        l3: ["L3"],
+        r3: ["R3"],
+        start: ["Start"],
+        select: ["Select"],
+    },
+)

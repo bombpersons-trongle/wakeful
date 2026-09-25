@@ -1,6 +1,8 @@
+mod assets;
 mod display;
 mod dither;
 mod editor;
+mod input;
 mod movement;
 mod scene;
 mod screen;
@@ -15,10 +17,11 @@ use bevy::sprite_render::Material2dPlugin;
 use bevy::window::WindowResolution;
 use bevy_common_assets::ron::RonAssetPlugin;
 
+use crate::input::InputManager;
 use crate::scene::Scene;
 use crate::systems::{
-    actor, animation, bubble, camera, debug_draw, input, party, player, scene as scene_loader,
-    teleport, world, world_script,
+    actor, animation, bubble, camera, debug_draw, input as sys_input, party, player,
+    scene as scene_loader, teleport, world, world_script,
 };
 use std::path::Path;
 
@@ -29,7 +32,7 @@ const FIXED_HZ: f64 = 60.0;
 /// Loads the global UI config into the resources that style themselves
 /// from it; runs before `bubble::setup` in the startup chain.
 fn load_ui_config(mut commands: Commands) {
-    let path = Path::new(editor::assets_root().as_os_str()).join("ui.ron");
+    let path = Path::new(assets::assets_root().as_os_str()).join("ui.ron");
     commands.insert_resource(bubble::BubbleTheme::from_file(&path));
     commands.insert_resource(display::DisplaySettings::from_file(&path));
 }
@@ -127,6 +130,12 @@ fn main() {
         .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
         .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
+        // bevy_gilrs only registers these when its backend starts, and
+        // that can legitimately fail (no pad subsystem); empty ones
+        // read as "no gamepad" instead of panicking the aggregator.
+        .init_resource::<ButtonInput<GamepadButton>>()
+        .init_resource::<Axis<GamepadAxis>>()
+        .insert_resource(InputManager::load())
         .insert_resource(party::Party::default())
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(
@@ -146,7 +155,7 @@ fn main() {
         .add_systems(
             Update,
             (
-                input::quit_on_escape,
+                sys_input::quit_on_escape,
                 screen::resize_present,
                 screen::validate_post_process_layout,
                 display::sync_display_effects,
@@ -172,6 +181,7 @@ fn main() {
         .add_systems(
             FixedUpdate,
             (
+                crate::input::aggregate_inputs,
                 player::move_player,
                 teleport::check_teleporters,
                 actor::run_actor_scripts,

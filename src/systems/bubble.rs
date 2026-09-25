@@ -51,9 +51,6 @@ const CLOSE_SECS: f32 = 0.08;
 /// Small but nonzero, so the animation never produces a degenerate
 /// transform.
 const MIN_SCALE: f32 = 1e-3;
-/// Keys that dismiss wait-mode bubbles; the classic JRPG confirm pair.
-const CONFIRM_KEYS: [KeyCode; 2] = [KeyCode::KeyZ, KeyCode::Enter];
-
 /// The `assets/ui.ron` file: global UI tuning, loaded once at startup.
 /// Colors are `(r, g, b, a)` floats.
 #[derive(Deserialize)]
@@ -469,10 +466,10 @@ pub(crate) fn dismiss_bubble(bubble: &mut SpeechBubble) {
 /// fully-open bubbles respond, so the keypress that opened one never
 /// dismisses it in the same breath.
 pub(crate) fn dismiss_on_confirm(
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<crate::input::InputManager>,
     mut bubbles: Query<&mut SpeechBubble>,
 ) {
-    if !CONFIRM_KEYS.into_iter().any(|key| keys.just_pressed(key)) {
+    if !input.just_pressed(crate::input::PadButton::Cross) {
         return;
     }
     for mut bubble in &mut bubbles {
@@ -1055,9 +1052,9 @@ mod tests {
     }
 
     fn press_confirm(world: &mut World) {
-        let mut keys = ButtonInput::<KeyCode>::default();
-        keys.press(CONFIRM_KEYS[0]);
-        world.insert_resource(keys);
+        let manager =
+            crate::input::InputManager::with_just_pressed(&[crate::input::PadButton::Cross]);
+        world.insert_resource(manager);
     }
 
     #[test]

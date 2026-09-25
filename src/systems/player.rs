@@ -73,7 +73,7 @@ pub(crate) struct PlaceholderBody;
 
 pub fn move_player(
     time: Res<Time>,
-    keys: Res<ButtonInput<KeyCode>>,
+    input: Res<crate::input::InputManager>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     editor: Option<Res<EditorState>>,
@@ -92,26 +92,15 @@ pub fn move_player(
     };
     let forward = scene.camera_forward();
 
-    // Arrows are camera-relative: up walks away from the camera, right
-    // walks to its screen-right, so controls stay intuitive whichever
-    // way the scene's camera faces.
-    let mut screen = Vec2::ZERO;
-    if keys.pressed(KeyCode::ArrowUp) {
-        screen.y += 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowDown) {
-        screen.y -= 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowLeft) {
-        screen.x -= 1.0;
-    }
-    if keys.pressed(KeyCode::ArrowRight) {
-        screen.x += 1.0;
-    }
+    // Input actions are camera-relative: up walks away from the camera,
+    // right walks to its screen-right, so controls stay intuitive
+    // whichever way the scene's camera faces. The dpad and the (gated)
+    // left stick sum into the same vector.
+    let screen = input.movement();
 
     let from = transform.translation.xz();
     let direction = camera_relative_direction(screen, forward);
-    let running = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
+    let running = input.pressed(crate::input::PadButton::R2);
     let speed = if running {
         PLAYER_RUN_SPEED
     } else {

@@ -8,6 +8,7 @@ use rhai::Scope;
 
 use crate::GameCamera;
 use crate::Player;
+use crate::input::InputHandle;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
 use crate::scripts::{ActorScript, Said, ScriptBroken};
@@ -68,12 +69,13 @@ pub(crate) fn spawn_actors(
     assets: &AssetServer,
     scene: &Scene,
     toward: Vec2,
+    input: &InputHandle,
 ) {
     for actor in &scene.actors {
         let script = actor
             .script
             .as_deref()
-            .and_then(ActorScript::load)
+            .and_then(|path| ActorScript::load(path, input))
             .map(|script| ScriptRuntime {
                 script,
                 scope: Scope::new(),
@@ -397,7 +399,13 @@ mod tests {
         };
         let server = world.resource::<AssetServer>().clone();
         let mut commands = world.commands();
-        spawn_actors(&mut commands, &server, &scene, Vec2::NEG_Y);
+        spawn_actors(
+            &mut commands,
+            &server,
+            &scene,
+            Vec2::NEG_Y,
+            &crate::input::detached(),
+        );
         world.flush();
 
         let mut actors = world.query::<(&Transform, &Actor)>();

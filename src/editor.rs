@@ -14,6 +14,7 @@ use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use crate::assets::assets_root;
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
 use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
@@ -34,25 +35,6 @@ const NEW_GRID_ORIGIN: [f32; 2] = [-4.0, -4.0];
 const NEW_GRID_CELL: f32 = 1.0;
 const NEW_GRID_COLS: usize = 8;
 const NEW_GRID_ROWS: usize = 8;
-
-/// Where asset files live: the asset server's folder. Mirrors the asset
-/// server's root resolution (env override, cargo manifest, or next to
-/// the executable) so file access works no matter how the game is
-/// launched. Shared with actor script loading.
-pub(crate) const ASSETS_DIR: &str = "assets";
-
-pub(crate) fn assets_root() -> PathBuf {
-    if let Some(root) = std::env::var_os("BEVY_ASSET_ROOT") {
-        return PathBuf::from(root);
-    }
-    if let Some(root) = std::env::var_os("CARGO_MANIFEST_DIR") {
-        return PathBuf::from(root).join(ASSETS_DIR);
-    }
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join(ASSETS_DIR)))
-        .unwrap_or_else(|| PathBuf::from(ASSETS_DIR))
-}
 
 pub fn plugin(app: &mut App) {
     app.add_plugins(EguiPlugin::default())
