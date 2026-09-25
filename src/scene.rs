@@ -21,6 +21,13 @@ pub struct Scene {
     /// Trigger rects that load another scene when the player touches one.
     #[serde(default)]
     pub teleporters: Vec<Teleporter>,
+    /// Path to the scene's Rhai script, relative to `assets/`. It runs
+    /// for as long as the scene does — `on_enter(player_x, player_z)`
+    /// when the scene applies, `on_update(player_x, player_z, dt)` every
+    /// fixed tick, `on_exit()` when it tears down; missing hooks are
+    /// no-ops.
+    #[serde(default)]
+    pub script: Option<String>,
     /// Characters placed in the scene: a model, a ground position, and an
     /// optional Rhai script that moves them each tick.
     #[serde(default)]
@@ -413,11 +420,35 @@ mod tests {
                 target: "scenes/room2.scene".into(),
                 arrival: [1.0, 2.0],
             }],
+            script: None,
             actors: Vec::new(),
         };
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         let reparsed: Scene = ron::from_str(&text).unwrap();
         assert_eq!(reparsed.teleporters, scene.teleporters);
+    }
+
+    #[test]
+    fn the_scene_script_is_optional_and_defaults_to_none() {
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+            script: Some("scripts/room_intro.rhai"),
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert_eq!(scene.script.as_deref(), Some("scripts/room_intro.rhai"));
+
+        // Scenes written before the field existed keep loading.
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walkable: None,
+            character_model: None,
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert_eq!(scene.script, None);
     }
 
     #[test]
@@ -495,7 +526,7 @@ mod tests {
         assert!(grid.is_walkable(actor.position[0], actor.position[1]));
 
         let script =
-            crate::scripts::CompiledScript::compile(include_str!("../assets/scripts/test.rhai"))
+            crate::scripts::ActorScript::compile(include_str!("../assets/scripts/test.rhai"))
                 .expect("the shipped actor script must compile");
         let mut scope = rhai::Scope::new();
         // Far from the player it closes in; close by it stays put.
@@ -553,6 +584,7 @@ mod tests {
             walkable: None,
             character_model: None,
             teleporters: Vec::new(),
+            script: None,
             actors: Vec::new(),
         }
     }

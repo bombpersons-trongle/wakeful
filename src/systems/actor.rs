@@ -8,10 +8,9 @@ use rhai::Scope;
 
 use crate::GameCamera;
 use crate::Player;
-use crate::editor::assets_root;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
-use crate::scripts::{CompiledScript, Said};
+use crate::scripts::{ActorScript, Said, ScriptBroken};
 use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::scene::gltf_asset_path;
 use crate::text::TextAssets;
@@ -36,17 +35,13 @@ pub struct Actor {
 
 /// A compiled script and its persistent variable scope.
 struct ScriptRuntime {
-    script: CompiledScript,
+    script: ActorScript,
     scope: Scope<'static>,
 }
 
 /// glTF model queued for the actor; removed once attached as a child.
 #[derive(Component)]
 pub(crate) struct ActorModel(Handle<Gltf>);
-
-/// Marks an actor whose script errored.
-#[derive(Component)]
-pub(crate) struct ScriptBroken;
 
 /// Actors with runnable scripts and their transform; broken scripts are
 /// filtered out at the query level.
@@ -68,7 +63,14 @@ pub(crate) fn spawn_actors(
     toward: Vec2,
 ) {
     for actor in &scene.actors {
-        let script = actor.script.as_deref().and_then(load_script);
+        let script = actor
+            .script
+            .as_deref()
+            .and_then(ActorScript::load)
+            .map(|script| ScriptRuntime {
+                script,
+                scope: Scope::new(),
+            });
         commands.spawn((
             Actor {
                 script,
@@ -79,27 +81,6 @@ pub(crate) fn spawn_actors(
             Transform::from_xyz(actor.position[0], 0.0, actor.position[1])
                 .with_rotation(facing_rotation(toward)),
         ));
-    }
-}
-
-/// Reads and compiles an actor script from the assets folder.
-fn load_script(path: &str) -> Option<ScriptRuntime> {
-    let text = match std::fs::read_to_string(assets_root().join(path)) {
-        Ok(text) => text,
-        Err(e) => {
-            warn!("Actor script {path} could not be read, actor runs without it: {e}");
-            return None;
-        }
-    };
-    match CompiledScript::compile(&text) {
-        Ok(script) => Some(ScriptRuntime {
-            script,
-            scope: Scope::new(),
-        }),
-        Err(e) => {
-            warn!("Actor script {path} failed to compile, actor runs without it: {e}");
-            None
-        }
     }
 }
 
@@ -349,7 +330,7 @@ mod tests {
         (
             Actor {
                 script: Some(ScriptRuntime {
-                    script: CompiledScript::compile(text).unwrap(),
+                    script: ActorScript::compile(text).unwrap(),
                     scope: Scope::new(),
                 }),
                 bubble: None,
@@ -382,6 +363,7 @@ mod tests {
             walkable: None,
             character_model: None,
             teleporters: Vec::new(),
+            script: None,
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
                 position: [1.0, 2.0],
@@ -510,7 +492,7 @@ mod tests {
         camera.computed.clip_from_view =
             Mat4::perspective_rh(core::f32::consts::FRAC_PI_2, 1.0, 0.1, 100.0);
         world.spawn((GameCamera, camera, GlobalTransform::IDENTITY));
-        let script = CompiledScript::compile(
+        let script = ActorScript::compile(
             r#"
             fn on_update(x, z, px, pz, dt) {
                 if lines < 2 { lines += 1; say("line" + lines); }

@@ -5,9 +5,11 @@ use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
+use rhai::Scope;
 
 use crate::scene::Scene;
 use crate::screen;
+use crate::scripts::{SceneScript as SceneScriptRuntime, ScriptBroken};
 use crate::systems::actor::{self, Actor};
 use crate::systems::player;
 use crate::{
@@ -30,6 +32,15 @@ pub fn load_scene(mut commands: Commands, assets: Res<AssetServer>) {
     commands.insert_resource(SceneApplied(false));
 }
 
+/// The scene's script runtime, spawned when the scene applies and
+/// despawned with it. `entered` gates the one-shot `on_enter`.
+#[derive(Component)]
+pub(crate) struct SceneScript {
+    runtime: SceneScriptRuntime,
+    scope: Scope<'static>,
+    entered: bool,
+}
+
 /// Tears the old scene down when a teleporter was touched: despawns
 /// everything it brought (background camera, background sprite, player)
 /// and points `CurrentScene` at the destination file. The destination's
@@ -46,6 +57,7 @@ pub fn transition_scene(
     bg_cameras: Query<Entity, With<BackgroundCamera>>,
     players: Query<Entity, With<Player>>,
     actors: Query<Entity, With<Actor>>,
+    mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -56,6 +68,17 @@ pub fn transition_scene(
         .chain(players.iter())
         .chain(actors.iter())
     {
+        commands.entity(entity).despawn();
+    }
+    for (entity, mut script, broken) in &mut scene_scripts {
+        let SceneScript { runtime, scope, .. } = &mut *script;
+        // Broken scripts already warned once; their on_exit is skipped
+        // rather than risking a second failure on teardown.
+        if broken.is_none()
+            && let Err(e) = runtime.exit(scope)
+        {
+            warn!("Scene script errored in on_exit: {e}");
+        }
         commands.entity(entity).despawn();
     }
     // The old scene's model queue must not dress the new scene's player.
@@ -153,11 +176,56 @@ pub fn apply_scene(
 
     actor::spawn_actors(&mut commands, &assets, scene, scene.camera_forward());
 
+    // The scene's script, if the file declares one; run_scene_scripts
+    // fires its on_enter on the first tick after this.
+    if let Some(runtime) = scene.script.as_deref().and_then(SceneScriptRuntime::load) {
+        commands.spawn((SceneScript {
+            runtime,
+            scope: Scope::new(),
+            entered: false,
+        },));
+    }
+
     if let Some(path) = &scene.character_model {
         commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
     }
 
     applied.0 = true;
+}
+
+/// Runs the scene's script hooks on the fixed tick: `on_enter` once on
+/// the first tick after application, then `on_update` every tick. A
+/// runtime error disables the script with one warning.
+pub(crate) fn run_scene_scripts(
+    mut commands: Commands,
+    time: Res<Time>,
+    players: Query<&Transform, With<Player>>,
+    mut scripts: Query<(Entity, &mut SceneScript), Without<ScriptBroken>>,
+) {
+    let Ok(player) = players.single() else {
+        return;
+    };
+    let (player_x, player_z) = (player.translation.x, player.translation.z);
+    let dt = time.delta_secs();
+    for (entity, mut script) in &mut scripts {
+        let SceneScript {
+            runtime,
+            scope,
+            entered,
+        } = &mut *script;
+        if !*entered {
+            *entered = true;
+            if let Err(e) = runtime.enter(scope, player_x, player_z) {
+                warn!("Scene script errored in on_enter, disabling it: {e}");
+                commands.entity(entity).insert(ScriptBroken);
+                continue;
+            }
+        }
+        if let Err(e) = runtime.update(scope, player_x, player_z, dt) {
+            warn!("Scene script errored in on_update, disabling it: {e}");
+            commands.entity(entity).insert(ScriptBroken);
+        }
+    }
 }
 
 /// Spawns the scene's background image on its dedicated layer. Also used
@@ -281,6 +349,7 @@ mod tests {
             walkable: None,
             character_model: None,
             teleporters: Vec::new(),
+            script: None,
             actors: Vec::new(),
         }
     }
@@ -400,6 +469,7 @@ mod tests {
                 target: "scenes/elsewhere.scene".into(),
                 arrival: [0.0, 0.0],
             }],
+            script: None,
             actors: Vec::new(),
         }
     }
@@ -466,5 +536,80 @@ mod tests {
         world.run_system_once(apply_scene).unwrap();
         world.flush();
         assert!(world.resource::<TeleporterArmed>().0[0]);
+    }
+
+    #[test]
+    fn the_first_tick_fires_on_enter_then_on_update_each_tick() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.spawn((Player, Transform::from_xyz(3.0, 0.0, 4.0)));
+        let runtime = SceneScriptRuntime::compile(
+            r"
+            fn on_enter(px, pz) { enters += 1; entered_x = px; }
+            fn on_update(px, pz, dt) { updates += 1; }
+            ",
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("enters", 0_i64);
+        scope.push("entered_x", 0.0_f64);
+        scope.push("updates", 0_i64);
+        world.spawn((SceneScript {
+            runtime,
+            scope,
+            entered: false,
+        },));
+
+        world.run_system_once(run_scene_scripts).unwrap();
+        world.run_system_once(run_scene_scripts).unwrap();
+
+        let mut scripts = world.query::<&SceneScript>();
+        let script = scripts.single(&world).unwrap();
+        assert!(script.entered);
+        assert_eq!(script.scope.get_value::<i64>("enters"), Some(1));
+        assert_eq!(script.scope.get_value::<f64>("entered_x"), Some(3.0));
+        assert_eq!(script.scope.get_value::<i64>("updates"), Some(2));
+    }
+
+    #[test]
+    fn transition_runs_on_exit_and_drops_the_scene_script() {
+        let mut world = world_for_transition();
+        let runtime = SceneScriptRuntime::compile("fn on_exit() { }").unwrap();
+        let script_entity = world
+            .spawn((SceneScript {
+                runtime,
+                scope: Scope::new(),
+                entered: true,
+            },))
+            .id();
+
+        world.run_system_once(transition_scene).unwrap();
+        world.flush();
+
+        // The exit hook ran before the despawn (no panic) and the
+        // script is gone with the rest of the scene.
+        assert!(world.get_entity(script_entity).is_err());
+    }
+
+    #[test]
+    fn a_scene_script_which_errors_is_disabled_not_spammed() {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.spawn((Player, Transform::default()));
+        let runtime = SceneScriptRuntime::compile("fn on_update(px, pz, dt) { bogus(); }").unwrap();
+        let entity = world
+            .spawn((SceneScript {
+                runtime,
+                scope: Scope::new(),
+                entered: false,
+            },))
+            .id();
+
+        world.run_system_once(run_scene_scripts).unwrap();
+        world.flush();
+
+        assert!(world.get::<ScriptBroken>(entity).is_some());
+        // The tick query filters it out from then on.
+        world.run_system_once(run_scene_scripts).unwrap();
     }
 }

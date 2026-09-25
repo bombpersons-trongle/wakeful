@@ -18,6 +18,7 @@ use bevy_common_assets::ron::RonAssetPlugin;
 use crate::scene::Scene;
 use crate::systems::{
     actor, bubble, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
+    world_script,
 };
 use std::path::Path;
 
@@ -136,6 +137,7 @@ fn main() {
                 load_ui_config,
                 bubble::setup,
                 world::spawn_world,
+                world_script::startup,
                 scene_loader::load_scene,
             )
                 .chain(),
@@ -170,6 +172,8 @@ fn main() {
                 player::move_player,
                 teleport::check_teleporters,
                 actor::run_actor_scripts,
+                scene_loader::run_scene_scripts,
+                world_script::run_world_scripts,
             )
                 .chain(),
         )
