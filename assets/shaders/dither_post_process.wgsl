@@ -30,13 +30,20 @@ const BAYER_4X4: array<f32, 16> = array<f32, 16>(
 
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
+    let color = textureSampleLevel(screen_texture, texture_sampler, in.uv, 0.0).rgb;
+
+    // Off is fully off: raw colors, not even the quantization step.
+    if (settings.dither_strength <= 0.0) {
+        return vec4<f32>(color, 1.0);
+    }
+
     let texel = floor(in.uv * vec2<f32>(GAME_W, GAME_H));
     let uv_snapped = (texel + vec2<f32>(0.5)) / vec2<f32>(GAME_W, GAME_H);
-    let color = textureSampleLevel(screen_texture, texture_sampler, uv_snapped, 0.0).rgb;
+    let quantize_input = textureSampleLevel(screen_texture, texture_sampler, uv_snapped, 0.0).rgb;
 
     let dither_p = vec2<u32>(texel);
     let threshold = BAYER_4X4[(dither_p.y % 4u) * 4u + (dither_p.x % 4u)] / 15.0 - 0.5;
-    let dithered = color * settings.color_steps + threshold * settings.dither_strength;
+    let dithered = quantize_input * settings.color_steps + threshold * settings.dither_strength;
 
     return vec4<f32>(clamp(floor(dithered) / settings.color_steps, vec3<f32>(0.0), vec3<f32>(1.0)), 1.0);
 }

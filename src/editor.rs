@@ -99,8 +99,8 @@ pub fn cursor_to_game(
     window_physical: UVec2,
     game: UVec2,
 ) -> Option<Vec2> {
-    let scale = screen::integer_scale(window_physical, game) as f32;
-    let presented = screen::presented_size(window_physical, game).as_vec2();
+    let scale = screen::fit_scale(window_physical, game);
+    let presented = screen::presented_size(window_physical, game);
     let offset = (window_physical.as_vec2() - presented) / 2.0;
     let game_px = (cursor_logical * scale_factor - offset) / scale;
     if game_px.x < 0.0
@@ -575,9 +575,19 @@ mod tests {
     #[test]
     fn cursor_on_the_bars_maps_to_nothing() {
         let game = UVec2::new(640, 480);
-        // 1000x900 window: scale 1, so 180px of black on the left/right
-        let bar = cursor_to_game(Vec2::new(90.0, 450.0), 1.0, UVec2::new(1000, 900), game);
+        // 1000x900 window: fit scale 1.5625 puts 75px of black at the
+        // top and bottom; a point on the upper bar maps outside the game.
+        let bar = cursor_to_game(Vec2::new(500.0, 40.0), 1.0, UVec2::new(1000, 900), game);
         assert_eq!(bar, None);
+    }
+
+    #[test]
+    fn cursor_maps_through_a_fractional_fit() {
+        let game = UVec2::new(640, 480);
+        // 800x600 window: exactly 1.25x — the picture fills the window
+        // with no bars, so the window center is the game center.
+        let center = cursor_to_game(Vec2::new(400.0, 300.0), 1.0, UVec2::new(800, 600), game);
+        assert_eq!(center, Some(Vec2::new(320.0, 240.0)));
     }
 
     #[test]
@@ -601,7 +611,7 @@ mod tests {
             (window.x as f32 / scale) as u32,
             (window.y as f32 / scale) as u32,
         );
-        let presented = screen::presented_size(logical, game).as_vec2();
+        let presented = screen::presented_size(logical, game);
         let offset = (logical.as_vec2() - presented) / 2.0;
         let game_pixel = presented / game.as_vec2();
 
@@ -609,10 +619,11 @@ mod tests {
             cursor_to_game(offset, scale, window, game),
             Some(Vec2::ZERO)
         );
-        assert_eq!(
-            cursor_to_game(offset + presented - game_pixel, scale, window, game),
-            Some(Vec2::new(319.0, 239.0))
-        );
+        // Fractional scales leave float dust on the last-pixel corner,
+        // so compare with a tolerance instead of exact equality.
+        let last = cursor_to_game(offset + presented - game_pixel, scale, window, game);
+        assert!(last.is_some());
+        assert!(last.unwrap().abs_diff_eq(Vec2::new(319.0, 239.0), 1e-2));
     }
 
     #[test]

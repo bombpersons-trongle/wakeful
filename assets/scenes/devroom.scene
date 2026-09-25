@@ -20,7 +20,7 @@
         ],
     )),
     character_model: None,
-    background: None,
+    background: Some("backgrounds/carlisle.png"),
     // Test actor: the goblin runs scripts/test.rhai, which makes it
     // trail the player around the room.
     actors: [

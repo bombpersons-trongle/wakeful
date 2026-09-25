@@ -23,9 +23,10 @@ use bevy::shader::ShaderRef;
 ///
 /// Tuned defaults: full-strength dithering on the virtual texel grid at
 /// 4-bit color, matching a PS1-era look.
-#[derive(Component, ExtractComponent, Clone, Copy, ShaderType, Default)]
+#[derive(Component, ExtractComponent, Clone, Copy, ShaderType, Default, PartialEq)]
 pub struct DitherPostProcess {
-    /// Bayer threshold offset strength; 0 disables dithering.
+    /// Bayer threshold offset strength; 0 disables the whole pass —
+    /// raw colors, no dithering and no quantization.
     pub dither_strength: f32,
     /// Color quantization levels per channel.
     pub color_steps: f32,

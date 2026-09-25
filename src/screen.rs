@@ -1,5 +1,5 @@
 //! Offscreen rendering: the game draws to a fixed-size texture, then a
-//! present camera blits that texture to the window, integer-scaled and
+//! present camera blits that texture to the window, scaled to fit and
 //! letterboxed with black bars.
 //!
 //! Rendering everything into one virtual screen (rather than zooming the
@@ -13,6 +13,7 @@
 //! the post-process camera draws nothing and exists to carry fullscreen
 //! effects over the finished frame.
 
+use crate::display;
 use crate::dither::{self, DitherPostProcess};
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::RenderTarget;
@@ -30,18 +31,22 @@ pub fn game_size() -> UVec2 {
     UVec2::new(GAME_WIDTH, GAME_HEIGHT)
 }
 
-/// Largest whole multiple of `game` that fits inside `window`.
+/// Largest scale of `game` that fits inside `window`.
 ///
-/// Whole-number scaling keeps virtual pixels square and evenly sized.
-/// Clamped to at least 1 so tiny windows crop the picture instead of
-/// breaking the math.
-pub fn integer_scale(window: UVec2, game: UVec2) -> u32 {
-    (window.x / game.x).min(window.y / game.y).max(1)
+/// Fractional on purpose: the picture grows with every window size
+/// instead of jumping between whole multiples. Even pixel sizes are not
+/// a goal here — the CRT pass defines the picture's texture, and a real
+/// tube never had square game pixels to preserve. Clamped to at least 1
+/// so tiny windows crop the picture instead of shrinking below native.
+pub fn fit_scale(window: UVec2, game: UVec2) -> f32 {
+    let sx = window.x as f32 / game.x as f32;
+    let sy = window.y as f32 / game.y as f32;
+    sx.min(sy).max(1.0)
 }
 
 /// Window-space size of the presented game image.
-pub fn presented_size(window: UVec2, game: UVec2) -> UVec2 {
-    game * integer_scale(window, game)
+pub fn presented_size(window: UVec2, game: UVec2) -> Vec2 {
+    game.as_vec2() * fit_scale(window, game)
 }
 
 #[derive(Component)]
@@ -135,7 +140,9 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
     spawn_post_process_camera(&mut commands, &handle);
 
     // The present camera owns the window: black bars, then the finished
-    // game image, integer-scaled and letterboxed.
+    // game image, fit-scaled and letterboxed. The CRT material rides
+    // along so it processes the upscaled frame; display.rs syncs its
+    // settings from ui.ron.
     commands.spawn((
         Camera2d,
         Camera {
@@ -149,6 +156,7 @@ pub fn setup_screen(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
         Msaa::Off,
         RenderLayers::layer(1),
         PresentSprite,
+        display::tuned_crt(),
         Sprite {
             image: handle,
             ..default()
@@ -169,8 +177,7 @@ pub fn resize_present(
     // Sprite sizes are logical units, so scale from the logical window
     // size; physical pixels would over-size the image on scaled displays.
     let logical = UVec2::new(window.width() as u32, window.height() as u32);
-    let size = presented_size(logical, game_size()).as_vec2();
-    sprite.custom_size = Some(size);
+    sprite.custom_size = Some(presented_size(logical, game_size()));
 }
 
 /// One game-image camera, reduced to what the post-process layout
@@ -245,27 +252,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn scales_to_exact_multiple() {
-        assert_eq!(integer_scale(UVec2::new(1280, 960), game_size()), 4);
+    fn scales_fractionally_to_fit() {
+        assert_eq!(fit_scale(UVec2::new(1440, 960), game_size()), 4.0);
     }
 
     #[test]
-    fn fits_the_smaller_axis() {
-        // width allows 6x but height only 4x
-        assert_eq!(integer_scale(UVec2::new(1920, 1080), game_size()), 4);
+    fn follows_the_smaller_axis() {
+        // width allows 6x but height only 4.5x
+        let scale = fit_scale(UVec2::new(1920, 1080), game_size());
+        assert_eq!(scale, 4.5);
+        assert_eq!(
+            presented_size(UVec2::new(1920, 1080), game_size()),
+            Vec2::new(1440.0, 1080.0)
+        );
+    }
+
+    #[test]
+    fn fills_a_matching_window_completely() {
+        // 2.5x of 320x240 exactly fills an 800x600 window: no bars.
+        assert_eq!(fit_scale(UVec2::new(800, 600), game_size()), 2.5);
+        assert_eq!(
+            presented_size(UVec2::new(800, 600), game_size()),
+            Vec2::new(800.0, 600.0)
+        );
     }
 
     #[test]
     fn never_scales_below_one() {
-        assert_eq!(integer_scale(UVec2::new(300, 200), game_size()), 1);
-        assert_eq!(integer_scale(UVec2::new(500, 400), game_size()), 1);
-    }
-
-    #[test]
-    fn presented_size_is_game_size_times_scale() {
+        // Smaller than the game on both axes: clamp to native size and
+        // crop, so the picture never shrinks below the real resolution.
+        assert_eq!(fit_scale(UVec2::new(300, 200), game_size()), 1.0);
         assert_eq!(
-            presented_size(UVec2::new(1920, 1080), game_size()),
-            UVec2::new(1280, 960)
+            presented_size(UVec2::new(300, 200), game_size()),
+            Vec2::new(320.0, 240.0)
         );
     }
 
@@ -355,5 +374,27 @@ mod tests {
 
         let size = world.get::<Sprite>(sprite_entity).unwrap().custom_size;
         assert_eq!(size, Some(Vec2::new(640.0, 480.0)));
+    }
+
+    #[test]
+    fn resize_present_fills_a_matching_window() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        // 800x600 is exactly 2.5x the game image: the fractional fit
+        // must fill the window edge to edge instead of stopping at 2x.
+        let mut world = World::new();
+        world.spawn((
+            PrimaryWindow,
+            Window {
+                resolution: bevy::window::WindowResolution::new(800, 600),
+                ..default()
+            },
+        ));
+        let sprite_entity = world.spawn((PresentSprite, Sprite::default())).id();
+
+        world.run_system_once(resize_present).unwrap();
+
+        let size = world.get::<Sprite>(sprite_entity).unwrap().custom_size;
+        assert_eq!(size, Some(Vec2::new(800.0, 600.0)));
     }
 }
