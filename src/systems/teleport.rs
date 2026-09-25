@@ -86,7 +86,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: vec![Teleporter {
                 position: [2.0, 0.0],
                 size: [2.0, 2.0],

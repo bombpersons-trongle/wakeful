@@ -17,8 +17,8 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
 use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
-use crate::systems::scene::{gltf_asset_path, spawn_background};
-use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player, PlayerModel};
+use crate::systems::scene::spawn_background;
+use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player};
 
 /// Read-only camera access for picking rays in the editor.
 type GameCameraRefs<'w, 's> =
@@ -71,7 +71,6 @@ pub(crate) struct EditorState {
     /// for a left-drag, `Some(false)` for a right-drag, `None` when idle.
     painting: Option<bool>,
     background_field: String,
-    character_field: String,
     status: Option<String>,
 }
 
@@ -185,7 +184,6 @@ fn set_open(
     state.status = None;
     if open && let Some(scene) = current.and_then(|c| scenes.get(&c.handle)) {
         state.background_field = scene.background.clone().unwrap_or_default();
-        state.character_field = scene.character_model.clone().unwrap_or_default();
     }
 }
 
@@ -229,7 +227,6 @@ fn ui(
     current: Option<Res<CurrentScene>>,
     state: ResMut<EditorState>,
     background_sprites: Query<Entity, With<BackgroundSprite>>,
-    players: Query<Entity, With<Player>>,
 ) {
     let state = state.into_inner();
     if !state.open {
@@ -255,15 +252,6 @@ fn ui(
             &mut commands,
             &assets,
             &background_sprites,
-        );
-        ui.separator();
-        character_ui(
-            ui,
-            &mut scene,
-            &mut state.character_field,
-            &mut commands,
-            &assets,
-            &players,
         );
         ui.separator();
         walkable_ui(ui, &mut scene);
@@ -332,33 +320,6 @@ fn background_ui(
             }
             if let Some(path) = &scene.background {
                 spawn_background(commands, assets, path);
-            }
-        }
-    }
-}
-
-fn character_ui(
-    ui: &mut egui::Ui,
-    scene: &mut Scene,
-    field: &mut String,
-    commands: &mut Commands,
-    assets: &AssetServer,
-    players: &Query<Entity, With<Player>>,
-) {
-    ui.label("Character model (glTF path under assets/, empty = capsule)");
-    ui.text_edit_singleline(field);
-    if ui.button("Apply").clicked() {
-        let path = trimmed_path(field);
-        if path != scene.character_model {
-            scene.character_model = path.clone();
-            // Rebuild the model: drop the current one, then let the normal
-            // player-model application pick the new glTF up once loaded.
-            for player in players.iter() {
-                commands.entity(player).despawn_children();
-            }
-            commands.remove_resource::<PlayerModel>();
-            if let Some(path) = &scene.character_model {
-                commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
             }
         }
     }
@@ -657,7 +618,6 @@ mod tests {
                 rows: 2,
                 cells: [true, false, false, true],
             )),
-            character_model: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         let text = scene_to_ron(&scene).unwrap();
@@ -665,7 +625,6 @@ mod tests {
         assert_eq!(reparsed.camera.position, scene.camera.position);
         assert_eq!(reparsed.camera.fov_degrees, scene.camera.fov_degrees);
         assert_eq!(reparsed.background, scene.background);
-        assert_eq!(reparsed.character_model, scene.character_model);
         let grid = reparsed.walkable.unwrap();
         assert_eq!(grid.cols, 2);
         assert_eq!(grid.cells, [true, false, false, true]);

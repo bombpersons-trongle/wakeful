@@ -17,8 +17,8 @@ use bevy_common_assets::ron::RonAssetPlugin;
 
 use crate::scene::Scene;
 use crate::systems::{
-    actor, bubble, camera, debug_draw, input, player, scene as scene_loader, teleport, world,
-    world_script,
+    actor, animation, bubble, camera, debug_draw, input, party, player, scene as scene_loader,
+    teleport, world, world_script,
 };
 use std::path::Path;
 
@@ -127,6 +127,7 @@ fn main() {
         .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
         .add_plugins(editor::plugin)
         .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
+        .insert_resource(party::Party::default())
         .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
         .add_systems(
             Startup,
@@ -153,8 +154,10 @@ fn main() {
                 bubble::sync_theme,
                 scene_loader::apply_scene,
                 scene_loader::sync_ground,
-                scene_loader::apply_player_model,
+                party::sync_player_model,
+                party::attach_player_model,
                 actor::attach_actor_models,
+                animation::resolve_pending_animations,
                 bubble::fit_bubbles,
                 bubble::animate_bubbles,
                 debug_draw::debug_draw_walkables,
@@ -172,6 +175,7 @@ fn main() {
                 player::move_player,
                 teleport::check_teleporters,
                 actor::run_actor_scripts,
+                animation::run_character_animations,
                 scene_loader::run_scene_scripts,
                 world_script::run_world_scripts,
             )

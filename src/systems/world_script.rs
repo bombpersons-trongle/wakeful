@@ -9,6 +9,7 @@ use rhai::Scope;
 
 use crate::editor::assets_root;
 use crate::scripts::{ScriptBroken, WorldScript as WorldScriptRuntime, compile_script_file};
+use crate::systems::party::Party;
 
 /// Where world scripts live, relative to the assets folder.
 const WORLD_SCRIPTS_DIR: &str = "scripts/world";
@@ -60,6 +61,7 @@ fn spawn_world_scripts(commands: &mut Commands, dir: &Path) {
 pub(crate) fn run_world_scripts(
     mut commands: Commands,
     time: Res<Time>,
+    mut party: ResMut<Party>,
     mut scripts: Query<(Entity, &mut WorldScript), Without<ScriptBroken>>,
 ) {
     let dt = time.delta_secs();
@@ -69,9 +71,12 @@ pub(crate) fn run_world_scripts(
             runtime,
             scope,
         } = &mut *script;
-        if let Err(e) = runtime.update(scope, dt) {
-            warn!("World script {path} errored, disabling it: {e}");
-            commands.entity(entity).insert(ScriptBroken);
+        match runtime.update(scope, dt) {
+            Ok(changes) => party.apply(&changes),
+            Err(e) => {
+                warn!("World script {path} errored, disabling it: {e}");
+                commands.entity(entity).insert(ScriptBroken);
+            }
         }
     }
 }
@@ -149,8 +154,32 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_party_script_populates_the_roster() {
+        // Guards against the script erroring on its first tick (which
+        // would silently disable it and leave the capsule on the field).
+        let mut world = World::new();
+        world.insert_resource(crate::systems::party::Party::default());
+        world.insert_resource(Time::<()>::default());
+        let runtime =
+            WorldScriptRuntime::compile(include_str!("../../assets/scripts/world/party.rhai"))
+                .expect("the shipped party script must compile");
+        world.spawn((WorldScript {
+            path: "scripts/world/party.rhai".into(),
+            runtime,
+            scope: Scope::new(),
+        },));
+
+        world.run_system_once(run_world_scripts).unwrap();
+
+        // The roster is private; its Debug view is the readback.
+        let party = format!("{:?}", world.resource::<crate::systems::party::Party>());
+        assert!(party.contains(r#"leader: Some("hero")"#), "{party}");
+    }
+
+    #[test]
     fn a_world_script_which_errors_is_disabled_not_spammed() {
         let mut world = World::new();
+        world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(Time::<()>::default());
         let runtime = WorldScriptRuntime::compile("fn on_update(dt) { bogus(); }").unwrap();
         let entity = world

@@ -481,7 +481,6 @@
             false,
         ],
     )),
-    character_model: None,
     teleporters: [
         (
             position: (-2.0, 0.0),

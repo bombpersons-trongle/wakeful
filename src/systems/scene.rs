@@ -3,14 +3,15 @@
 
 use bevy::camera::RenderTarget;
 use bevy::camera::visibility::RenderLayers;
-use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use rhai::Scope;
 
+use crate::movement::facing_rotation;
 use crate::scene::Scene;
 use crate::screen;
 use crate::scripts::{SceneScript as SceneScriptRuntime, ScriptBroken};
 use crate::systems::actor::{self, Actor};
+use crate::systems::party::Party;
 use crate::systems::player;
 use crate::{
     BackgroundCamera, BackgroundSprite, CurrentScene, GameCameraQuery, Ground, PendingTeleport,
@@ -53,19 +54,21 @@ pub fn transition_scene(
     pending: Option<Res<PendingTeleport>>,
     current: Option<ResMut<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
+    mut party: ResMut<Party>,
     backgrounds: Query<Entity, With<BackgroundSprite>>,
     bg_cameras: Query<Entity, With<BackgroundCamera>>,
-    players: Query<Entity, With<Player>>,
     actors: Query<Entity, With<Actor>>,
     mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
 ) {
     let Some(pending) = pending else {
         return;
     };
+    // The player is NOT despawned: it's a persistent view of the party
+    // leader, and rebuilding it would flash the placeholder cone and
+    // reload the model every transition. apply_scene repositions it.
     for entity in backgrounds
         .iter()
         .chain(bg_cameras.iter())
-        .chain(players.iter())
         .chain(actors.iter())
     {
         commands.entity(entity).despawn();
@@ -74,10 +77,11 @@ pub fn transition_scene(
         let SceneScript { runtime, scope, .. } = &mut *script;
         // Broken scripts already warned once; their on_exit is skipped
         // rather than risking a second failure on teardown.
-        if broken.is_none()
-            && let Err(e) = runtime.exit(scope)
-        {
-            warn!("Scene script errored in on_exit: {e}");
+        if broken.is_none() {
+            match runtime.exit(scope) {
+                Ok(changes) => party.apply(&changes),
+                Err(e) => warn!("Scene script errored in on_exit: {e}"),
+            }
         }
         commands.entity(entity).despawn();
     }
@@ -95,7 +99,9 @@ pub fn transition_scene(
 }
 
 /// Applies the scene once its file has loaded: camera pose, background
-/// layer, a fresh player, and character model choice.
+/// layer, and the player — repositioned if it survives from the last
+/// scene, spawned fresh (placeholder cone; the party dresses it) on
+/// first load.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_scene(
     mut commands: Commands,
@@ -105,6 +111,7 @@ pub fn apply_scene(
     current: Option<Res<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
     spawn: Option<Res<PlayerSpawn>>,
+    mut players: Query<&mut Transform, With<Player>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -155,13 +162,21 @@ pub fn apply_scene(
     // after a transition. The player starts facing screen-up (away from
     // the camera).
     let at = spawn.map(|spawn| spawn.0).unwrap_or(Vec2::ZERO);
-    player::spawn_player(
-        &mut commands,
-        &mut meshes,
-        &mut materials,
-        at,
-        scene.camera_forward(),
-    );
+    // The player persists across scenes; on first load there isn't one
+    // yet, and it starts as the placeholder cone for the party to dress.
+    match players.single_mut() {
+        Ok(mut transform) => {
+            transform.translation = Vec3::new(at.x, player::PLAYER_Y, at.y);
+            transform.rotation = facing_rotation(scene.camera_forward());
+        }
+        Err(_) => player::spawn_player(
+            &mut commands,
+            &mut meshes,
+            &mut materials,
+            at,
+            scene.camera_forward(),
+        ),
+    }
     commands.remove_resource::<PlayerSpawn>();
 
     // A teleporter already under the player on arrival must not fire
@@ -186,10 +201,6 @@ pub fn apply_scene(
         },));
     }
 
-    if let Some(path) = &scene.character_model {
-        commands.insert_resource(PlayerModel(assets.load(gltf_asset_path(path))));
-    }
-
     applied.0 = true;
 }
 
@@ -199,6 +210,7 @@ pub fn apply_scene(
 pub(crate) fn run_scene_scripts(
     mut commands: Commands,
     time: Res<Time>,
+    mut party: ResMut<Party>,
     players: Query<&Transform, With<Player>>,
     mut scripts: Query<(Entity, &mut SceneScript), Without<ScriptBroken>>,
 ) {
@@ -215,15 +227,21 @@ pub(crate) fn run_scene_scripts(
         } = &mut *script;
         if !*entered {
             *entered = true;
-            if let Err(e) = runtime.enter(scope, player_x, player_z) {
-                warn!("Scene script errored in on_enter, disabling it: {e}");
-                commands.entity(entity).insert(ScriptBroken);
-                continue;
+            match runtime.enter(scope, player_x, player_z) {
+                Ok(changes) => party.apply(&changes),
+                Err(e) => {
+                    warn!("Scene script errored in on_enter, disabling it: {e}");
+                    commands.entity(entity).insert(ScriptBroken);
+                    continue;
+                }
             }
         }
-        if let Err(e) = runtime.update(scope, player_x, player_z, dt) {
-            warn!("Scene script errored in on_update, disabling it: {e}");
-            commands.entity(entity).insert(ScriptBroken);
+        match runtime.update(scope, player_x, player_z, dt) {
+            Ok(changes) => party.apply(&changes),
+            Err(e) => {
+                warn!("Scene script errored in on_update, disabling it: {e}");
+                commands.entity(entity).insert(ScriptBroken);
+            }
         }
     }
 }
@@ -278,39 +296,6 @@ pub fn sync_ground(
     };
 }
 
-/// Swaps the placeholder capsule for the scene's character model once the
-/// glTF file has loaded.
-pub fn apply_player_model(
-    mut commands: Commands,
-    model: Option<Res<PlayerModel>>,
-    gltfs: Res<Assets<Gltf>>,
-    mut players: Query<Entity, With<Player>>,
-) {
-    let Some(model) = model else {
-        return;
-    };
-    let Some(gltf) = gltfs.get(&model.0) else {
-        return;
-    };
-    // The file's default scene; the first one if the glTF declares none.
-    let Some(scene) = gltf
-        .default_scene
-        .clone()
-        .or_else(|| gltf.scenes.first().cloned())
-    else {
-        return;
-    };
-    let Ok(player) = players.single_mut() else {
-        return;
-    };
-    commands
-        .entity(player)
-        .remove::<Mesh3d>()
-        .remove::<MeshMaterial3d<StandardMaterial>>()
-        .with_child((WorldAssetRoot(scene), Transform::default()));
-    commands.remove_resource::<PlayerModel>();
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -347,7 +332,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: Vec::new(),
             script: None,
             actors: Vec::new(),
@@ -418,6 +402,7 @@ mod tests {
             path: "scenes/devroom.scene".to_string(),
         });
         world.insert_resource(SceneApplied(true));
+        world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(PlayerModel(Handle::default()));
         world.insert_resource(PendingTeleport {
             target: "scenes/room2.scene".to_string(),
@@ -440,7 +425,8 @@ mod tests {
         let mut players = world.query::<&Player>();
         assert_eq!(sprites.iter(&world).count(), 0);
         assert_eq!(cams.iter(&world).count(), 0);
-        assert_eq!(players.iter(&world).count(), 0);
+        // The player persists across scenes (a view of the party leader).
+        assert_eq!(players.iter(&world).count(), 1);
         assert!(world.get_resource::<PlayerModel>().is_none());
         assert!(world.get_resource::<PendingTeleport>().is_none());
 
@@ -462,7 +448,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: vec![Teleporter {
                 position: [3.0, 4.0],
                 size: [1.0, 1.0],
@@ -476,6 +461,7 @@ mod tests {
 
     fn world_for_apply(scene: Scene, player_spawn: Option<Vec2>) -> World {
         let mut world = World::new();
+        world.insert_resource(crate::systems::party::Party::default());
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
@@ -496,6 +482,40 @@ mod tests {
         }
         world.spawn((GameCamera, Transform::default(), Projection::default()));
         world
+    }
+
+    #[test]
+    fn a_surviving_player_is_repositioned_and_keeps_its_body() {
+        // The player persists across scenes: apply must move it instead
+        // of duplicating it, and whatever body the party attached stays.
+        let mut world = world_for_apply(test_scene(None), Some(Vec2::new(3.0, 4.0)));
+        let player = world.spawn((Player, Transform::default())).id();
+        world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
+            world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
+                let mut commands = world.commands();
+                crate::systems::player::spawn_placeholder_body(
+                    &mut commands,
+                    player,
+                    &mut meshes,
+                    &mut materials,
+                );
+            });
+        });
+        world.flush();
+
+        world.run_system_once(apply_scene).unwrap();
+        world.flush();
+
+        let mut players = world.query_filtered::<Entity, With<Player>>();
+        assert_eq!(players.iter(&world).count(), 1, "no duplicate player");
+        let mut transforms = world.query_filtered::<&Transform, With<Player>>();
+        let transform = transforms.single(&world).unwrap();
+        assert_eq!(transform.translation.xz(), Vec2::new(3.0, 4.0));
+        let body = world
+            .query_filtered::<&ChildOf, With<crate::systems::player::PlaceholderBody>>()
+            .single(&world)
+            .unwrap();
+        assert_eq!(body.parent(), player, "the attached body survives");
     }
 
     #[test]
@@ -542,6 +562,7 @@ mod tests {
     fn the_first_tick_fires_on_enter_then_on_update_each_tick() {
         let mut world = World::new();
         world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
         world.spawn((Player, Transform::from_xyz(3.0, 0.0, 4.0)));
         let runtime = SceneScriptRuntime::compile(
             r"
@@ -574,6 +595,7 @@ mod tests {
     #[test]
     fn transition_runs_on_exit_and_drops_the_scene_script() {
         let mut world = world_for_transition();
+        world.insert_resource(crate::systems::party::Party::default());
         let runtime = SceneScriptRuntime::compile("fn on_exit() { }").unwrap();
         let script_entity = world
             .spawn((SceneScript {
@@ -595,6 +617,7 @@ mod tests {
     fn a_scene_script_which_errors_is_disabled_not_spammed() {
         let mut world = World::new();
         world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
         world.spawn((Player, Transform::default()));
         let runtime = SceneScriptRuntime::compile("fn on_update(px, pz, dt) { bogus(); }").unwrap();
         let entity = world

@@ -14,10 +14,6 @@ pub struct Scene {
     pub background: Option<String>,
     pub camera: CameraPose,
     pub walkable: Option<WalkableGrid>,
-    /// Path to the player's glTF model, e.g. `models/hero.glb`. The file's
-    /// default scene is spawned; a `#SceneN` suffix, if present, is ignored.
-    /// When absent, the player is the placeholder capsule.
-    pub character_model: Option<String>,
     /// Trigger rects that load another scene when the player touches one.
     #[serde(default)]
     pub teleporters: Vec<Teleporter>,
@@ -67,8 +63,8 @@ impl Teleporter {
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
 pub struct Actor {
-    /// glTF model path relative to `assets/`, with the same rules as
-    /// `Scene::character_model` (default scene used, `#SceneN` ignored).
+    /// glTF model path relative to `assets/` (default scene used, a
+    /// `#SceneN` suffix, if present, is ignored).
     pub model: String,
     /// Ground-plane XZ position.
     pub position: [f32; 2],
@@ -352,7 +348,6 @@ mod tests {
                 rows: 2,
                 cells: [true, false, false, true],
             )),
-            character_model: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert_eq!(scene.camera.position, [0.0, 6.0, 9.0]);
@@ -368,7 +363,6 @@ mod tests {
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
             teleporters: [
                 (
                     position: (4.0, 0.0),
@@ -397,7 +391,6 @@ mod tests {
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert!(scene.teleporters.is_empty());
@@ -413,7 +406,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: vec![Teleporter {
                 position: [4.0, 0.0],
                 size: [2.0, 1.0],
@@ -429,12 +421,25 @@ mod tests {
     }
 
     #[test]
+    fn scenes_from_before_the_party_still_load() {
+        // character_model left the format when the party took over the
+        // player's model; old files carrying it must keep parsing.
+        let src = r#"(
+            background: None,
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            character_model: Some("models/old.glb"),
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        assert_eq!(scene.background, None);
+        assert_eq!(scene.script, None);
+    }
+
+    #[test]
     fn the_scene_script_is_optional_and_defaults_to_none() {
         let src = r#"(
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
             script: Some("scripts/room_intro.rhai"),
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
@@ -445,7 +450,6 @@ mod tests {
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert_eq!(scene.script, None);
@@ -582,7 +586,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: Vec::new(),
             script: None,
             actors: Vec::new(),
@@ -595,7 +598,6 @@ mod tests {
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
             actors: [
                 (
                     model: "models/goblin.glb",
@@ -626,7 +628,6 @@ mod tests {
             background: None,
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
             walkable: None,
-            character_model: None,
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         assert!(scene.actors.is_empty());

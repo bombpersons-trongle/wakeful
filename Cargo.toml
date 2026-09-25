@@ -21,3 +21,8 @@ bevy_egui = "0.42"
 rhai = { version = "1.21", features = ["sync"] }
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Mirrors bevy_gltf's own parser: validates the generated character model
+# without standing up the whole asset-server pipeline.
+gltf = "1.4"

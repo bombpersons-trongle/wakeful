@@ -15,11 +15,17 @@
 //!   `on_update(x, z, player_x, player_z, dt)` returns nothing to stay
 //!   put, or `[new_x, new_z]` to move. `on_update` is required.
 //!
-//! Host functions are tier-scoped. Actors get `say(text)` and
-//! `say(text, opts)` — collecting a line (with placement, timing, and
-//! wait options) to show as a speech bubble — and `waiting()`, which
-//! reports whether the actor's wait-mode bubble is still open. There is
-//! no file or network access; scripts can only compute.
+//! Host functions are tier-scoped. All tiers get the party mutators —
+//! `party_add(id, name, model)`, `party_remove(id)`, and
+//! `party_leader(id)` — because recruiting a member by talking to an
+//! NPC is an actor-script move, a cutscene splitting the party is a
+//! scene-script move, and menu-driven leader picks are world-script
+//! moves. Actors additionally get `say(text)` and `say(text, opts)` —
+//! collecting a line (with placement, timing, and wait options) to show
+//! as a speech bubble — and `waiting()`, which reports whether the
+//! actor's wait-mode bubble is still open, plus `emote(name)` to play
+//! one of the model's one-shot clips. There is no file or network
+//! access; scripts can only compute.
 //!
 //! Each runtime is called with a caller-owned [`Scope`] that persists
 //! script state between calls.
@@ -50,13 +56,33 @@ pub struct Said {
     pub ttl: Option<f64>,
 }
 
-/// What one actor script update produced: where the actor goes and
-/// what it said, in call order.
+/// A party roster change a script requested this update.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PartyCommand {
+    Add {
+        id: String,
+        name: String,
+        model: String,
+    },
+    Remove {
+        id: String,
+    },
+    Leader {
+        id: String,
+    },
+}
+
+/// What one actor script update produced: where the actor goes, what
+/// it said, an emote, and party changes, in call order.
 pub struct Tick {
     /// `None` to stay put, or the new ground position.
     pub position: Option<[f32; 2]>,
     /// Lines the script `say`-ed this update.
     pub said: Vec<Said>,
+    /// The clip name from the last `emote` call this update, if any.
+    pub emote: Option<String>,
+    /// Party changes the script requested this update.
+    pub party: Vec<PartyCommand>,
 }
 
 /// Marks a script runtime that errored: the runtime is skipped from
@@ -139,12 +165,45 @@ fn load_script_file<T>(
     compile_script_file(&crate::editor::assets_root().join(path), tier, compile)
 }
 
+/// Registers the party mutators every tier shares: calls append to the
+/// sink and surface on the tick as [`PartyCommand`]s.
+fn register_party_api(engine: &mut Engine, sink: &Arc<Mutex<Vec<PartyCommand>>>) {
+    let add = sink.clone();
+    engine.register_fn("party_add", move |id: &str, name: &str, model: &str| {
+        add.lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PartyCommand::Add {
+                id: id.to_owned(),
+                name: name.to_owned(),
+                model: model.to_owned(),
+            });
+    });
+    let remove = sink.clone();
+    engine.register_fn("party_remove", move |id: &str| {
+        remove
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PartyCommand::Remove { id: id.to_owned() });
+    });
+    let leader = sink.clone();
+    engine.register_fn("party_leader", move |id: &str| {
+        leader
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(PartyCommand::Leader { id: id.to_owned() });
+    });
+}
+
 /// The actor tier's runtime: compiled script plus the `say`/`waiting`
 /// bridges to the host.
 pub struct ActorScript {
     script: CompiledScript,
     /// `say` output appends here; drained once per update.
     said: Arc<Mutex<Vec<Said>>>,
+    /// `emote` records here; last call per update wins.
+    emote: Arc<Mutex<Option<String>>>,
+    /// Party mutator calls collect here; drained once per update.
+    party: Arc<Mutex<Vec<PartyCommand>>>,
     /// Mirrored in by the host each update; read by `waiting()`.
     waiting: Arc<Mutex<bool>>,
 }
@@ -153,8 +212,12 @@ impl ActorScript {
     /// Compiles an actor script.
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
         let said = Arc::new(Mutex::new(Vec::new()));
+        let emote = Arc::new(Mutex::new(None));
+        let party = Arc::new(Mutex::new(Vec::new()));
         let waiting = Arc::new(Mutex::new(false));
+        let party_sink = party.clone();
         let script = CompiledScript::compile(text, |engine| {
+            register_party_api(engine, &party_sink);
             let sink = said.clone();
             engine.register_fn("say", move |line: &str| {
                 sink.lock()
@@ -175,6 +238,10 @@ impl ActorScript {
                     Ok(())
                 },
             );
+            let sink = emote.clone();
+            engine.register_fn("emote", move |name: &str| {
+                *sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(name.to_owned());
+            });
             let flag = waiting.clone();
             engine.register_fn("waiting", move || {
                 *flag.lock().unwrap_or_else(PoisonError::into_inner)
@@ -183,6 +250,8 @@ impl ActorScript {
         Ok(Self {
             script,
             said,
+            emote,
+            party,
             waiting,
         })
     }
@@ -213,8 +282,9 @@ impl ActorScript {
         player_z: f32,
         dt: f32,
     ) -> Result<Tick, ScriptError> {
-        // say() output belongs to the update that calls it; clear any
-        // residue from a previous update that errored mid-drain.
+        // say() and emote() output belongs to the update that calls
+        // them; clear any residue from a previous update that errored
+        // mid-drain.
         self.said
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -238,20 +308,42 @@ impl ActorScript {
                 .unwrap_or_else(PoisonError::into_inner)
                 .as_mut(),
         );
-        Ok(Tick { position, said })
+        let emote = {
+            let mut emote = self.emote.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut *emote)
+        };
+        let party = std::mem::take(
+            self.party
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut(),
+        );
+        Ok(Tick {
+            position,
+            said,
+            emote,
+            party,
+        })
     }
 }
 
 /// The scene tier's runtime: lifecycle hooks over one scene's lifetime.
 pub struct SceneScript {
     script: CompiledScript,
+    /// Party mutator calls collect here; drained once per hook call.
+    party: Arc<Mutex<Vec<PartyCommand>>>,
 }
 
 impl SceneScript {
     /// Compiles a scene script.
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
+        let party = Arc::new(Mutex::new(Vec::new()));
+        let party_sink = party.clone();
         Ok(Self {
-            script: CompiledScript::compile(text, |_| ())?,
+            script: CompiledScript::compile(text, |engine| {
+                register_party_api(engine, &party_sink);
+            })?,
+            party,
         })
     }
 
@@ -263,12 +355,13 @@ impl SceneScript {
     }
 
     /// Runs `on_enter(player_x, player_z)` once per scene application.
+    /// Any party changes the hook requested come back with the result.
     pub fn enter(
         &self,
         scope: &mut Scope,
         player_x: f32,
         player_z: f32,
-    ) -> Result<(), ScriptError> {
+    ) -> Result<Vec<PartyCommand>, ScriptError> {
         self.call_optional(scope, "on_enter", (player_x as f64, player_z as f64))
     }
 
@@ -279,7 +372,7 @@ impl SceneScript {
         player_x: f32,
         player_z: f32,
         dt: f32,
-    ) -> Result<(), ScriptError> {
+    ) -> Result<Vec<PartyCommand>, ScriptError> {
         self.call_optional(
             scope,
             "on_update",
@@ -288,45 +381,72 @@ impl SceneScript {
     }
 
     /// Runs `on_exit()` as the scene is torn down.
-    pub fn exit(&self, scope: &mut Scope) -> Result<(), ScriptError> {
+    pub fn exit(&self, scope: &mut Scope) -> Result<Vec<PartyCommand>, ScriptError> {
         self.call_optional(scope, "on_exit", ())
     }
 
-    /// Calls an optional entry point: an undefined function is a no-op,
-    /// a defined one that errors is an error.
+    /// Calls an optional entry point: an undefined function is a no-op
+    /// with no commands, a defined one that errors is an error (its
+    /// partial commands are dropped with the rest of the call).
     fn call_optional(
         &self,
         scope: &mut Scope,
         name: &str,
         args: impl rhai::FuncArgs,
-    ) -> Result<(), ScriptError> {
+    ) -> Result<Vec<PartyCommand>, ScriptError> {
+        self.party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
         if !self.script.defines(name) {
-            return Ok(());
+            return Ok(Vec::new());
         }
-        self.script.call(scope, name, args).map(|_| ())
+        let _ = self.script.call(scope, name, args)?;
+        Ok(std::mem::take(
+            self.party
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut(),
+        ))
     }
 }
 
 /// The world tier's runtime: one per-tick hook over the whole game.
 pub struct WorldScript {
     script: CompiledScript,
+    /// Party mutator calls collect here; drained once per update.
+    party: Arc<Mutex<Vec<PartyCommand>>>,
 }
 
 impl WorldScript {
     /// Compiles a world script.
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
+        let party = Arc::new(Mutex::new(Vec::new()));
+        let party_sink = party.clone();
         Ok(Self {
-            script: CompiledScript::compile(text, |_| ())?,
+            script: CompiledScript::compile(text, |engine| {
+                register_party_api(engine, &party_sink);
+            })?,
+            party,
         })
     }
 
-    /// Runs `on_update(dt)` for one fixed tick. Unlike the scene
-    /// tier's hooks, `on_update` is required: it is the tier's whole
-    /// contract, and its absence is an error that disables the script.
-    pub fn update(&self, scope: &mut Scope, dt: f32) -> Result<(), ScriptError> {
-        self.script
-            .call(scope, "on_update", (dt as f64,))
-            .map(|_| ())
+    /// Runs `on_update(dt)` for one fixed tick, returning any party
+    /// changes the script requested. Unlike the scene tier's hooks,
+    /// `on_update` is required: it is the tier's whole contract, and
+    /// its absence is an error that disables the script.
+    pub fn update(&self, scope: &mut Scope, dt: f32) -> Result<Vec<PartyCommand>, ScriptError> {
+        self.party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        let _ = self.script.call(scope, "on_update", (dt as f64,))?;
+        Ok(std::mem::take(
+            self.party
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .as_mut(),
+        ))
     }
 }
 
@@ -712,6 +832,82 @@ mod tests {
     fn a_missing_world_update_is_a_contract_violation() {
         let script = WorldScript::compile("fn helper() { 42 }").unwrap();
         assert!(script.update(&mut Scope::new(), 0.5).is_err());
+    }
+
+    #[test]
+    fn an_emote_request_reaches_the_tick_and_the_last_call_wins() {
+        let script = ActorScript::compile(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if waved < 1 {
+                    emote("shrug");
+                    emote("wave");
+                    waved = 1;
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("waved", 0_i64);
+        let first = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        let second = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(first.emote.as_deref(), Some("wave"));
+        // Emotes are per-update requests, like said lines.
+        assert_eq!(second.emote, None);
+    }
+
+    #[test]
+    fn party_mutators_surface_as_commands_on_every_tier() {
+        let script = ActorScript::compile(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if joined < 1 {
+                    joined = 1;
+                    party_add("pip", "Pip", "models/pip.glb");
+                    party_leader("pip");
+                    party_remove("zeph");
+                }
+            }
+            "#,
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("joined", 0_i64);
+        let tick = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(
+            tick.party,
+            vec![
+                PartyCommand::Add {
+                    id: "pip".into(),
+                    name: "Pip".into(),
+                    model: "models/pip.glb".into(),
+                },
+                PartyCommand::Leader { id: "pip".into() },
+                PartyCommand::Remove { id: "zeph".into() },
+            ]
+        );
+        // Per-update requests, like everything else.
+        let tick = script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert!(tick.party.is_empty());
+
+        // Scene hooks and world updates carry them too.
+        let scene = SceneScript::compile("fn on_enter(px, pz) { party_leader(\"pip\"); }").unwrap();
+        assert_eq!(
+            scene.enter(&mut Scope::new(), 0.0, 0.0).unwrap(),
+            vec![PartyCommand::Leader { id: "pip".into() }]
+        );
+        let world =
+            WorldScript::compile("fn on_update(dt) { party_add(\"a\", \"A\", \"m.glb\"); }")
+                .unwrap();
+        assert_eq!(
+            world.update(&mut Scope::new(), 0.5).unwrap(),
+            vec![PartyCommand::Add {
+                id: "a".into(),
+                name: "A".into(),
+                model: "m.glb".into(),
+            }]
+        );
     }
 
     #[test]

@@ -11,7 +11,9 @@ use crate::Player;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
 use crate::scripts::{ActorScript, Said, ScriptBroken};
+use crate::systems::animation::{EmoteRequest, Locomotion, PendingAnimations};
 use crate::systems::bubble::{self, BubbleTheme};
+use crate::systems::party::Party;
 use crate::systems::scene::gltf_asset_path;
 use crate::text::TextAssets;
 
@@ -48,7 +50,12 @@ pub(crate) struct ActorModel(Handle<Gltf>);
 type ActorQuery<'w, 's> = Query<
     'w,
     's,
-    (Entity, &'static mut Transform, &'static mut Actor),
+    (
+        Entity,
+        &'static mut Transform,
+        &'static mut Actor,
+        Option<&'static mut Locomotion>,
+    ),
     (Without<Player>, Without<ScriptBroken>),
 >;
 
@@ -77,6 +84,7 @@ pub(crate) fn spawn_actors(
                 bubble: None,
                 said: None,
             },
+            Locomotion::default(),
             ActorModel(assets.load(gltf_asset_path(&actor.model))),
             Transform::from_xyz(actor.position[0], 0.0, actor.position[1])
                 .with_rotation(facing_rotation(toward)),
@@ -103,6 +111,7 @@ pub(crate) fn attach_actor_models(
         };
         commands
             .entity(entity)
+            .insert(PendingAnimations(model.0.clone()))
             .with_child((WorldAssetRoot(scene), Transform::default()));
         commands.entity(entity).remove::<ActorModel>();
     }
@@ -120,9 +129,11 @@ pub(crate) struct UiAssets<'w> {
 /// Runs each actor's `on_update`, applies the returned position, and
 /// shows whatever the script `say`-ed as a speech bubble above it.
 /// Actors are not grid-constrained: their scripts are trusted content.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_actor_scripts(
     mut commands: Commands,
     time: Res<Time>,
+    mut party: ResMut<Party>,
     players: Query<&Transform, With<Player>>,
     cameras: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
     mut actors: ActorQuery,
@@ -135,7 +146,7 @@ pub(crate) fn run_actor_scripts(
     let (player_x, player_z) = (player.translation.x, player.translation.z);
     let dt = time.delta_secs();
     let camera = cameras.single().ok();
-    for (entity, mut transform, mut actor) in &mut actors {
+    for (entity, mut transform, mut actor, locomotion) in &mut actors {
         let position = &transform.translation;
         // The script polls waiting() to hold its place while the player
         // hasn't confirmed its wait-mode bubble yet. Computed before the
@@ -158,12 +169,26 @@ pub(crate) fn run_actor_scripts(
             dt,
         ) {
             Ok(tick) => {
+                let from = Vec2::new(position.x, position.z);
                 if let Some([x, z]) = tick.position {
-                    let direction = Vec2::new(x, z) - Vec2::new(position.x, position.z);
+                    let direction = Vec2::new(x, z) - from;
                     transform.translation = Vec3::new(x, 0.0, z);
                     transform.rotation =
                         face_direction(transform.rotation, direction, TURN_SPEED, dt);
                 }
+                // The gait follows actual displacement, so a script
+                // holding still reads as standing, and an emote goes
+                // straight to the animation driver.
+                if let Some(mut locomotion) = locomotion {
+                    locomotion.moving = tick
+                        .position
+                        .is_some_and(|[x, z]| (x - from.x).abs() + (z - from.y).abs() > 1e-6);
+                    locomotion.running = false;
+                }
+                if let Some(name) = tick.emote {
+                    commands.entity(entity).insert(EmoteRequest(Some(name)));
+                }
+                party.apply(&tick.party);
                 if !tick.said.is_empty() {
                     // Lines said off-screen — or with no camera — are
                     // dropped this tick; a visible script says again.
@@ -286,6 +311,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
+    use crate::systems::party::Party;
     use crate::text;
     use bevy::asset::{AssetServer, AssetServerMode, UnapprovedPathMode, io::AssetSourceBuilders};
     use bevy::ecs::system::RunSystemOnce;
@@ -361,7 +387,6 @@ mod tests {
                 fov_degrees: 45.0,
             },
             walkable: None,
-            character_model: None,
             teleporters: Vec::new(),
             script: None,
             actors: vec![crate::scene::Actor {
@@ -378,8 +403,8 @@ mod tests {
         let mut actors = world.query::<(&Transform, &Actor)>();
         let (transform, _) = actors.single(&world).unwrap();
         assert_eq!(transform.translation, Vec3::new(1.0, 0.0, 2.0));
-        let nose = transform.rotation * Vec3::Y;
-        assert!(nose.abs_diff_eq(Vec3::NEG_Z, 1e-5));
+        let front = transform.rotation * Vec3::Z;
+        assert!(front.abs_diff_eq(Vec3::NEG_Z, 1e-5));
     }
 
     #[test]
@@ -410,12 +435,13 @@ mod tests {
     #[test]
     fn the_script_moves_the_actor_and_turns_its_nose() {
         let mut world = World::new();
+        world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.spawn((Player, Transform::from_xyz(50.0, 0.9, 50.0)));
         let (actor, transform) = scripted_actor("fn on_update(x, z, px, pz, dt) { [x + 1.0, z] }");
         world.spawn((
             actor,
-            transform.with_rotation(Quat::from_rotation_arc(Vec3::Y, Vec3::NEG_Z)),
+            transform.with_rotation(Quat::from_rotation_arc(Vec3::Z, Vec3::NEG_Z)),
         ));
         world
             .resource_mut::<Time>()
@@ -426,14 +452,15 @@ mod tests {
         let mut actors = world.query_filtered::<&Transform, With<Actor>>();
         let transform = actors.single(&world).unwrap();
         assert_eq!(transform.translation, Vec3::new(2.0, 0.0, 2.0));
-        // 5 radians of budget turns the nose all the way from -Z to +X.
-        let nose = transform.rotation * Vec3::Y;
-        assert!(nose.abs_diff_eq(Vec3::X, 1e-4));
+        // 5 radians of budget turns the front all the way from -Z to +X.
+        let front = transform.rotation * Vec3::Z;
+        assert!(front.abs_diff_eq(Vec3::X, 1e-4));
     }
 
     #[test]
     fn a_saying_script_spawns_a_timed_bubble_above_the_actor() {
         let mut world = World::new();
+        world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
@@ -475,6 +502,7 @@ mod tests {
     #[test]
     fn saying_again_replaces_the_previous_bubble() {
         let mut world = World::new();
+        world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
@@ -537,6 +565,7 @@ mod tests {
     #[test]
     fn repeating_a_line_keeps_the_bubble_steady() {
         let mut world = World::new();
+        world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<ColorMaterial>::default());
@@ -575,6 +604,7 @@ mod tests {
     #[test]
     fn a_broken_script_is_disabled_not_a_crash() {
         let mut world = World::new();
+        world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.spawn((Player, Transform::default()));
         let (actor, transform) = scripted_actor("fn on_update(x, z, px, pz, dt) { 7 }");
