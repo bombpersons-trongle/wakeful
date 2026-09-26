@@ -11,6 +11,7 @@ use crate::assets::assets_root;
 use crate::input::{InputHandle, InputManager};
 use crate::scripts::{ScriptBroken, WorldScript as WorldScriptRuntime, compile_script_file};
 use crate::systems::party::Party;
+use crate::systems::ui::UiApi;
 
 /// Where world scripts live, relative to the assets folder.
 const WORLD_SCRIPTS_DIR: &str = "scripts/world";
@@ -25,18 +26,19 @@ pub(crate) struct WorldScript {
 }
 
 /// Startup: compiles every `.rhai` file in the world scripts folder.
-pub(crate) fn startup(mut commands: Commands, input: Res<InputManager>) {
+pub(crate) fn startup(mut commands: Commands, input: Res<InputManager>, ui: Res<UiApi>) {
     spawn_world_scripts(
         &mut commands,
         &assets_root().join(WORLD_SCRIPTS_DIR),
         &input.handle(),
+        &ui,
     );
 }
 
 /// Compiles every `.rhai` file in `dir` into a world script entity, in
 /// path order. A missing or empty dir means zero world scripts, which
 /// is fine.
-fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle) {
+fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle, ui: &UiApi) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -51,8 +53,9 @@ fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle)
     paths.sort();
     for path in paths {
         let handle = input.clone();
+        let ui = ui.clone();
         let Some(runtime) = compile_script_file(&path, "World", move |text| {
-            WorldScriptRuntime::compile_with_handle(text, handle.clone())
+            WorldScriptRuntime::compile_with_handle(text, handle.clone(), ui.clone())
         }) else {
             continue;
         };
@@ -93,6 +96,7 @@ pub(crate) fn run_world_scripts(
 mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use std::path::PathBuf;
+    use std::sync::PoisonError;
 
     use super::*;
 
@@ -133,8 +137,10 @@ mod tests {
 
         let mut world = World::new();
         world.insert_resource(crate::input::InputManager::standard());
+        world.insert_resource(crate::systems::ui::UiApi::new());
         let input = world.resource::<crate::input::InputManager>().handle();
-        spawn_world_scripts(&mut world.commands(), &dir.0, &input);
+        let ui = world.resource::<crate::systems::ui::UiApi>().clone();
+        spawn_world_scripts(&mut world.commands(), &dir.0, &input, &ui);
         world.flush();
 
         let mut scripts = world.query::<&WorldScript>();
@@ -157,16 +163,111 @@ mod tests {
     fn a_missing_folder_means_zero_world_scripts() {
         let mut world = World::new();
         world.insert_resource(crate::input::InputManager::standard());
+        world.insert_resource(crate::systems::ui::UiApi::new());
         let input = world.resource::<crate::input::InputManager>().handle();
+        let ui = world.resource::<crate::systems::ui::UiApi>().clone();
         spawn_world_scripts(
             &mut world.commands(),
             Path::new("/nonexistent/wakeful"),
             &input,
+            &ui,
         );
         world.flush();
 
         let mut scripts = world.query::<&WorldScript>();
         assert_eq!(scripts.iter(&world).count(), 0);
+    }
+
+    #[test]
+    fn the_shipped_triangle_menu_script_drives_the_ui() {
+        use crate::input::{InputManager, PadButton};
+        use crate::scripts::UiRequest;
+        use crate::systems::ui::{UiApi, navigate as ui_navigate};
+
+        let mut world = World::new();
+        world.insert_resource(Party::default());
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(InputManager::standard());
+        let api = UiApi::new();
+        world.insert_resource(api.clone());
+        let handle = world.resource::<InputManager>().handle();
+        let runtime = WorldScriptRuntime::compile_with_handle(
+            include_str!("../../assets/scripts/world/triangle_menu.rhai"),
+            handle.clone(),
+            api.clone(),
+        )
+        .unwrap();
+        world.spawn((WorldScript {
+            path: "scripts/world/triangle_menu.rhai".into(),
+            runtime,
+            scope: Scope::new(),
+        },));
+
+        // Per tick: aggregate input into the shared state (navigate
+        // consumes it, the script reads confirmations), run the script,
+        // then inspect what UI it requested.
+        let tick = |world: &mut World, just: &[PadButton]| {
+            let input = world.resource::<InputManager>().handle();
+            input
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .inject(&[], just, &[]);
+            world.run_system_once(ui_navigate).unwrap();
+            world.run_system_once(run_world_scripts).unwrap();
+            api.take_requests()
+        };
+
+        // Closed by default: no UI at all.
+        let requests = tick(&mut world, &[]);
+        assert!(requests.is_empty());
+
+        // Triangle opens: the field pauses and the menu is declared.
+        let requests = tick(&mut world, &[PadButton::Triangle]);
+        assert!(requests.contains(&UiRequest::Pause(true)));
+        assert!(requests.contains(&UiRequest::Window {
+            name: "menu".into(),
+            x: 8.0,
+            y: 8.0,
+            w: 200.0,
+            h: 110.0,
+        }));
+
+        // The engine's reconcile declares the options; the script
+        // re-declares the menu each tick while it stays open.
+        api.nav()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .declare("menu", 5);
+        let requests = tick(&mut world, &[]);
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(request, UiRequest::Window { name, .. } if name == "menu"))
+        );
+
+        // Cross picks the top option: the stub panel is declared.
+        let requests = tick(&mut world, &[PadButton::Cross]);
+        assert!(requests.contains(&UiRequest::Window {
+            name: "picked".into(),
+            x: 60.0,
+            y: 128.0,
+            w: 140.0,
+            h: 22.0,
+        }));
+
+        // Circle closes everything and unfreezes the field.
+        let requests = tick(&mut world, &[PadButton::Circle]);
+        assert!(requests.contains(&UiRequest::Pause(false)));
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(request, UiRequest::Close { name } if name == "menu"))
+        );
+        assert!(
+            requests
+                .iter()
+                .any(|request| matches!(request, UiRequest::Close { name } if name == "picked"))
+        );
     }
 
     #[test]

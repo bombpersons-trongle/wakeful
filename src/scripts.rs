@@ -33,6 +33,7 @@
 //! Each runtime is called with a caller-owned [`Scope`] that persists
 //! script state between calls.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -41,6 +42,7 @@ use bevy::prelude::Component;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
 
 use crate::input::InputHandle;
+use crate::systems::ui::UiApi;
 
 /// What an actor's `say` call produced: the line plus how it should be
 /// shown.
@@ -75,6 +77,44 @@ pub enum PartyCommand {
     Leader {
         id: String,
     },
+}
+
+/// A UI change a script requested. Windows are named and declarative:
+/// `ui_window` (re)declares a panel and clears its content, the content
+/// requests that follow fill it in, and the engine reconciles entities
+/// each fixed tick (see [`crate::systems::ui`]).
+#[derive(Clone, Debug, PartialEq)]
+pub enum UiRequest {
+    Window {
+        name: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+    Text {
+        window: String,
+        text: String,
+        x: f32,
+        y: f32,
+    },
+    Options {
+        window: String,
+        x: f32,
+        y: f32,
+        labels: Vec<String>,
+    },
+    Bar {
+        window: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        ratio: f32,
+    },
+    Close {
+        name: String,
+    },
+    Pause(bool),
 }
 
 /// What one actor script update produced: where the actor goes, what
@@ -251,6 +291,101 @@ fn unknown_action(name: &str) -> Box<rhai::EvalAltResult> {
     ))
 }
 
+/// Registers the UI functions every tier shares: they push requests
+/// into the shared [`UiApi`], which the engine drains each fixed tick.
+fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_window",
+        move |name: &str, x: f64, y: f64, w: f64, h: f64| {
+            api.push(UiRequest::Window {
+                name: name.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                h: h as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_text",
+        move |window: &str, text: &str, x: f64, y: f64| {
+            api.push(UiRequest::Text {
+                window: window.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_options",
+        move |window: &str, x: f64, y: f64, labels: rhai::Array| {
+            let labels: Vec<String> = labels
+                .into_iter()
+                .map(|label| label.into_string().unwrap_or_default())
+                .collect();
+            api.push(UiRequest::Options {
+                window: window.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                labels,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_bar",
+        move |window: &str, x: f64, y: f64, w: f64, ratio: f64| {
+            api.push(UiRequest::Bar {
+                window: window.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                ratio: ratio as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn("ui_close", move |name: &str| {
+        api.push(UiRequest::Close {
+            name: name.to_owned(),
+        });
+    });
+    let api = ui.clone();
+    engine.register_fn("ui_pause", move |pause: bool| {
+        api.push(UiRequest::Pause(pause));
+    });
+    let api = ui.clone();
+    engine.register_fn("ui_confirmed", move |name: &str| -> i64 {
+        api.confirmed(name)
+    });
+}
+
+/// Registers the per-script state store: `remember(key, value)` writes
+/// and `recall(key)` reads back, persisting for the script's lifetime.
+/// Values live only in the script's own map — private by design.
+fn register_state_api(engine: &mut Engine, store: &Arc<Mutex<BTreeMap<String, Dynamic>>>) {
+    let saved = store.clone();
+    engine.register_fn("remember", move |key: &str, value: Dynamic| {
+        saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.to_owned(), value);
+    });
+    let saved = store.clone();
+    engine.register_fn("recall", move |key: &str| -> Dynamic {
+        saved
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+            .unwrap_or(Dynamic::UNIT)
+    });
+}
+
 /// The actor tier's runtime: compiled script plus the `say`/`waiting`
 /// bridges to the host.
 pub struct ActorScript {
@@ -272,18 +407,27 @@ impl ActorScript {
     /// the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached())
+        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
     }
 
-    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(
+        text: &str,
+        input: InputHandle,
+        ui: UiApi,
+    ) -> Result<Self, rhai::ParseError> {
         let said = Arc::new(Mutex::new(Vec::new()));
         let emote = Arc::new(Mutex::new(None));
         let party = Arc::new(Mutex::new(Vec::new()));
         let waiting = Arc::new(Mutex::new(false));
         let party_sink = party.clone();
         let input_sink = input.clone();
+        let ui_sink = ui.clone();
+        let store = Arc::new(Mutex::new(BTreeMap::new()));
+        let store_sink = store.clone();
         let script = CompiledScript::compile(text, |engine| {
+            register_state_api(engine, &store_sink);
             register_input_api(engine, &input_sink);
+            register_ui_api(engine, &ui_sink);
             register_party_api(engine, &party_sink);
             let sink = said.clone();
             engine.register_fn("say", move |line: &str| {
@@ -325,11 +469,13 @@ impl ActorScript {
 
     /// Loads an actor script from the assets folder: `None` (after a
     /// warning) when unreadable or non-compiling, so the actor runs
-    /// without it. `input` is the manager's shared state handle.
-    pub fn load(path: &str, input: &InputHandle) -> Option<Self> {
+    /// without it. `input` is the manager's shared state handle; `ui`
+    /// the shared UI API.
+    pub fn load(path: &str, input: &InputHandle, ui: &UiApi) -> Option<Self> {
         let handle = input.clone();
+        let ui = ui.clone();
         load_script_file(path, "Actor", move |text| {
-            Self::compile_with_handle(text, handle.clone())
+            Self::compile_with_handle(text, handle.clone(), ui.clone())
         })
     }
 
@@ -409,16 +555,25 @@ impl SceneScript {
     /// contract checks); the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached())
+        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
     }
 
-    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(
+        text: &str,
+        input: InputHandle,
+        ui: UiApi,
+    ) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
         let input_sink = input.clone();
+        let ui_sink = ui.clone();
+        let store = Arc::new(Mutex::new(BTreeMap::new()));
+        let store_sink = store.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
+                register_state_api(engine, &store_sink);
                 register_input_api(engine, &input_sink);
+                register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
             })?,
             party,
@@ -428,10 +583,11 @@ impl SceneScript {
     /// Loads a scene script from the assets folder: `None` (after a
     /// warning) when unreadable or non-compiling, so the scene runs
     /// without it.
-    pub fn load(path: &str, input: &InputHandle) -> Option<Self> {
+    pub fn load(path: &str, input: &InputHandle, ui: &UiApi) -> Option<Self> {
         let handle = input.clone();
+        let ui = ui.clone();
         load_script_file(path, "Scene", move |text| {
-            Self::compile_with_handle(text, handle.clone())
+            Self::compile_with_handle(text, handle.clone(), ui.clone())
         })
     }
 
@@ -504,16 +660,25 @@ impl WorldScript {
     /// contract checks); the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached())
+        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
     }
 
-    pub fn compile_with_handle(text: &str, input: InputHandle) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(
+        text: &str,
+        input: InputHandle,
+        ui: UiApi,
+    ) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
         let input_sink = input.clone();
+        let ui_sink = ui.clone();
+        let store = Arc::new(Mutex::new(BTreeMap::new()));
+        let store_sink = store.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
+                register_state_api(engine, &store_sink);
                 register_input_api(engine, &input_sink);
+                register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
             })?,
             party,
@@ -947,6 +1112,7 @@ mod tests {
             }
             "#,
             manager.handle(),
+            UiApi::new(),
         )
         .unwrap();
         let mut scope = Scope::new();
@@ -962,6 +1128,7 @@ mod tests {
         let script = ActorScript::compile_with_handle(
             r#"fn on_update(x, z, player_x, player_z, dt) { bogused = pressed("south"); }"#,
             manager.handle(),
+            UiApi::new(),
         )
         .unwrap();
         assert!(
@@ -969,6 +1136,51 @@ mod tests {
                 .update(&mut Scope::new(), 0.0, 0.0, 0.0, 0.0, 0.5)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn ui_functions_declare_windows_and_read_confirmations() {
+        use crate::input::{InputState, PadButton};
+        use crate::systems::ui::UiApi;
+
+        let api = UiApi::new();
+        let script = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                ui_window("menu", 8.0, 8.0, 100.0, 60.0);
+                ui_text("menu", "Hello", 4.0, 4.0);
+                ui_options("menu", 60.0, 4.0, ["Yes", "No"]);
+                ui_bar("menu", 4.0, 20.0, 40.0, 0.5);
+                if ui_confirmed("menu") >= 0 { chose = 1; }
+            }
+            "#,
+            crate::input::detached(),
+            api.clone(),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("chose", 0_i64);
+
+        // Before anything is confirmed, the script just declares UI.
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<i64>("chose"), Some(0));
+        let requests = api.take_requests();
+        assert!(matches!(requests.first(), Some(UiRequest::Window { .. })));
+        assert_eq!(requests.len(), 4);
+
+        // A confirm lands for one tick, and the script sees it.
+        api.nav()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .declare("menu", 2);
+        let mut input = InputState::default();
+        input.inject(&[], &[PadButton::Cross], &[]);
+        api.nav()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .navigate(&input);
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<i64>("chose"), Some(1));
     }
 
     #[test]
@@ -1050,7 +1262,8 @@ mod tests {
     #[test]
     fn load_reads_a_shipped_script_and_missing_paths_warn_to_none() {
         let input = crate::input::detached();
-        assert!(ActorScript::load("scripts/test.rhai", &input).is_some());
-        assert!(ActorScript::load("scripts/does-not-exist.rhai", &input).is_none());
+        let ui = crate::systems::ui::UiApi::new();
+        assert!(ActorScript::load("scripts/test.rhai", &input, &ui).is_some());
+        assert!(ActorScript::load("scripts/does-not-exist.rhai", &input, &ui).is_none());
     }
 }

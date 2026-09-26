@@ -1,4 +1,6 @@
 mod assets;
+#[cfg(debug_assertions)]
+mod debug_shot;
 mod display;
 mod dither;
 mod editor;
@@ -21,7 +23,7 @@ use crate::input::InputManager;
 use crate::scene::Scene;
 use crate::systems::{
     actor, animation, bubble, camera, debug_draw, input as sys_input, party, player,
-    scene as scene_loader, teleport, world, world_script,
+    scene as scene_loader, teleport, ui, world, world_script,
 };
 use std::path::Path;
 
@@ -115,81 +117,98 @@ type GameCameraQuery<'w, 's> = Query<
 >;
 
 fn main() {
-    App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
-            primary_window: Some(Window {
-                title: "wakeful".into(),
-                resolution: WindowResolution::new(screen::GAME_WIDTH * 2, screen::GAME_HEIGHT * 2),
-                ..default()
-            }),
+    let mut app = App::new();
+    app.add_plugins(DefaultPlugins.set(WindowPlugin {
+        primary_window: Some(Window {
+            title: "wakeful".into(),
+            resolution: WindowResolution::new(screen::GAME_WIDTH * 2, screen::GAME_HEIGHT * 2),
             ..default()
-        }))
-        .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
-        .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
-        .add_plugins(FullscreenMaterialPlugin::<display::CrtMaterial>::default())
-        .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
-        .add_plugins(editor::plugin)
-        .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
-        // bevy_gilrs only registers these when its backend starts, and
-        // that can legitimately fail (no pad subsystem); empty ones
-        // read as "no gamepad" instead of panicking the aggregator.
-        .init_resource::<ButtonInput<GamepadButton>>()
-        .init_resource::<Axis<GamepadAxis>>()
-        .insert_resource(InputManager::load())
-        .insert_resource(party::Party::default())
-        .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
-        .add_systems(
-            Startup,
-            (
-                screen::setup_screen,
-                camera::setup_game_camera,
-                text::setup,
-                load_ui_config,
-                bubble::setup,
-                world::spawn_world,
-                world_script::startup,
-                scene_loader::load_scene,
-            )
-                .chain(),
+        }),
+        ..default()
+    }))
+    .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
+    .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
+    .add_plugins(FullscreenMaterialPlugin::<display::CrtMaterial>::default())
+    .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
+    .add_plugins(editor::plugin)
+    .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
+    // bevy_gilrs only registers these when its backend starts, and
+    // that can legitimately fail (no pad subsystem); empty ones
+    // read as "no gamepad" instead of panicking the aggregator.
+    .init_resource::<ButtonInput<GamepadButton>>()
+    .init_resource::<Axis<GamepadAxis>>()
+    .insert_resource(InputManager::load())
+    .insert_resource(ui::UiApi::new())
+    .init_resource::<ui::UiPause>()
+    .init_resource::<crate::input::InjectedInputs>()
+    .insert_resource(party::Party::default())
+    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
+    .add_systems(
+        Startup,
+        (
+            screen::setup_screen,
+            camera::setup_game_camera,
+            text::setup,
+            load_ui_config,
+            bubble::setup,
+            ui::setup,
+            world::spawn_world,
+            world_script::startup,
+            scene_loader::load_scene,
         )
-        .add_systems(
+            .chain(),
+    )
+    .add_systems(
+        Update,
+        (
+            sys_input::quit_on_escape,
+            screen::resize_present,
+            screen::validate_post_process_layout,
+            display::sync_display_effects,
+            bubble::dismiss_on_confirm,
+            bubble::sync_theme,
+            scene_loader::apply_scene,
+            scene_loader::sync_ground,
+            party::sync_player_model,
+            party::attach_player_model,
+            actor::attach_actor_models,
+            animation::resolve_pending_animations,
+            bubble::fit_bubbles,
+            bubble::animate_bubbles,
+            debug_draw::debug_draw_walkables,
+        ),
+    )
+    // Transition before application so a scene whose file is already
+    // cached applies the same frame the teleport lands.
+    .add_systems(
+        Update,
+        scene_loader::transition_scene.before(scene_loader::apply_scene),
+    )
+    .add_systems(
+        FixedUpdate,
+        (
+            crate::input::aggregate_inputs,
+            ui::navigate,
+            player::move_player,
+            teleport::check_teleporters,
+            actor::run_actor_scripts,
+            animation::run_character_animations,
+            scene_loader::run_scene_scripts,
+            world_script::run_world_scripts,
+            ui::drain,
+            ui::sync_cursor,
+        )
+            .chain(),
+    );
+
+    #[cfg(debug_assertions)]
+    {
+        app.add_systems(Startup, debug_shot::setup);
+        app.add_systems(
             Update,
-            (
-                sys_input::quit_on_escape,
-                screen::resize_present,
-                screen::validate_post_process_layout,
-                display::sync_display_effects,
-                bubble::dismiss_on_confirm,
-                bubble::sync_theme,
-                scene_loader::apply_scene,
-                scene_loader::sync_ground,
-                party::sync_player_model,
-                party::attach_player_model,
-                actor::attach_actor_models,
-                animation::resolve_pending_animations,
-                bubble::fit_bubbles,
-                bubble::animate_bubbles,
-                debug_draw::debug_draw_walkables,
-            ),
-        )
-        // Transition before application so a scene whose file is already
-        // cached applies the same frame the teleport lands.
-        .add_systems(
-            Update,
-            scene_loader::transition_scene.before(scene_loader::apply_scene),
-        )
-        .add_systems(
-            FixedUpdate,
-            (
-                crate::input::aggregate_inputs,
-                player::move_player,
-                teleport::check_teleporters,
-                actor::run_actor_scripts,
-                animation::run_character_animations,
-                scene_loader::run_scene_scripts,
-                world_script::run_world_scripts,
-            )
-                .chain(),
-        )
-        .run();
+            (debug_shot::check_requests, debug_shot::check_input_requests),
+        );
+    }
+
+    app.run();
 }

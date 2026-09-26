@@ -21,6 +21,9 @@ bevy_egui = "0.42"
 rhai = { version = "1.21", features = ["sync"] }
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
+# Same major version bevy_image pulls in, PNG-only: encodes debug
+# screenshots (see src/debug_shot.rs).
+image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 # Mirrors bevy_gltf's own parser: validates the generated character model

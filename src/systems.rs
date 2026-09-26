@@ -11,5 +11,6 @@ pub mod party;
 pub mod player;
 pub mod scene;
 pub mod teleport;
+pub mod ui;
 pub mod world;
 pub mod world_script;

@@ -77,11 +77,13 @@ pub fn move_player(
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     editor: Option<Res<EditorState>>,
+    pause: Res<crate::systems::ui::UiPause>,
     mut players: Query<(&mut Transform, Option<&mut Locomotion>), With<Player>>,
 ) {
     // Editing pauses play: the mouse paints cells and the camera pose is
-    // whatever the panel says.
-    if editor.is_some_and(|editor| editor.open) {
+    // whatever the panel says. Script UI can pause the world too — FF7
+    // menus freeze the field.
+    if editor.is_some_and(|editor| editor.open) || pause.0 {
         return;
     }
     let Ok((mut transform, locomotion)) = players.single_mut() else {

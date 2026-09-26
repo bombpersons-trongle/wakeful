@@ -5752,6 +5752,7 @@ dependencies = [
  "bevy_egui",
  "bevy_render",
  "gltf",
+ "image",
  "rhai",
  "ron 0.12.2",
  "serde",

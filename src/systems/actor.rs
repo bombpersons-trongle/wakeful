@@ -16,6 +16,7 @@ use crate::systems::animation::{EmoteRequest, Locomotion, PendingAnimations};
 use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::party::Party;
 use crate::systems::scene::gltf_asset_path;
+use crate::systems::ui::UiApi;
 use crate::text::TextAssets;
 
 /// How long a scripted line stays up before closing itself.
@@ -70,12 +71,13 @@ pub(crate) fn spawn_actors(
     scene: &Scene,
     toward: Vec2,
     input: &InputHandle,
+    ui: &UiApi,
 ) {
     for actor in &scene.actors {
         let script = actor
             .script
             .as_deref()
-            .and_then(|path| ActorScript::load(path, input))
+            .and_then(|path| ActorScript::load(path, input, ui))
             .map(|script| ScriptRuntime {
                 script,
                 scope: Scope::new(),
@@ -405,6 +407,7 @@ mod tests {
             &scene,
             Vec2::NEG_Y,
             &crate::input::detached(),
+            &crate::systems::ui::UiApi::new(),
         );
         world.flush();
 

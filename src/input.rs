@@ -47,7 +47,7 @@ pub enum PadButton {
 
 impl PadButton {
     /// The config name: `cross`, `dpad_up`, `l2`, ...
-    fn from_config(name: &str) -> Option<Self> {
+    pub(crate) fn from_config(name: &str) -> Option<Self> {
         Some(match name {
             "cross" => Self::Cross,
             "circle" => Self::Circle,
@@ -486,6 +486,20 @@ impl InputState {
         self.just_pressed = just_pressed.iter().copied().collect();
         self.axes = axes.iter().copied().collect();
     }
+
+    /// ORs a single button into the state; used by the injected-input
+    /// merge (see [`InjectedInputs`]).
+    pub(crate) fn press_button(&mut self, button: PadButton) {
+        self.pressed.insert(button);
+    }
+
+    pub(crate) fn mark_just_pressed(&mut self, button: PadButton) {
+        self.just_pressed.insert(button);
+    }
+
+    pub(crate) fn mark_just_released(&mut self, button: PadButton) {
+        self.just_released.insert(button);
+    }
 }
 
 /// A handle to a never-updated state: for scripts compiled outside the
@@ -635,14 +649,45 @@ pub fn digital(v: f32) -> f32 {
 /// of `FixedUpdate` so gameplay and scripts always see this tick's
 /// fresh edges.
 #[allow(clippy::type_complexity)]
+/// Buttons a debug layer holds or taps on top of real devices (the
+/// file-driven scanner lives in `debug_shot`, behind
+/// `cfg(debug_assertions)`). Nothing populates this in release, so the
+/// OR in [`aggregate_inputs`] is a no-op there.
+#[derive(Resource, Default)]
+pub struct InjectedInputs {
+    pub(crate) held: BTreeSet<PadButton>,
+    pub(crate) just_pressed: BTreeSet<PadButton>,
+    pub(crate) just_released: BTreeSet<PadButton>,
+}
+
+impl InjectedInputs {
+    pub(crate) fn merge_into(&self, state: &mut InputState) {
+        for button in &self.held {
+            state.press_button(*button);
+        }
+        for button in &self.just_pressed {
+            state.press_button(*button);
+            state.mark_just_pressed(*button);
+        }
+        for button in &self.just_released {
+            state.mark_just_released(*button);
+        }
+    }
+}
+
 pub fn aggregate_inputs(
     mut manager: ResMut<InputManager>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pad_buttons: Res<ButtonInput<GamepadButton>>,
     pad_axes: Res<Axis<GamepadAxis>>,
+    injected: Option<Res<InjectedInputs>>,
 ) {
     manager.aggregate(&keys, &mouse, &pad_buttons, &pad_axes);
+    if let Some(injected) = injected {
+        let state = manager.handle();
+        injected.merge_into(&mut state.lock().unwrap_or_else(PoisonError::into_inner));
+    }
 }
 
 #[cfg(test)]

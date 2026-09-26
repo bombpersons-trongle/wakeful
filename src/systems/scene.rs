@@ -14,6 +14,7 @@ use crate::scripts::{SceneScript as SceneScriptRuntime, ScriptBroken};
 use crate::systems::actor::{self, Actor};
 use crate::systems::party::Party;
 use crate::systems::player;
+use crate::systems::ui::{UiApi, UiWindow, close_all};
 use crate::{
     BackgroundCamera, BackgroundSprite, CurrentScene, GameCameraQuery, Ground, PendingTeleport,
     Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed,
@@ -60,6 +61,8 @@ pub fn transition_scene(
     bg_cameras: Query<Entity, With<BackgroundCamera>>,
     actors: Query<Entity, With<Actor>>,
     mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
+    ui: Res<UiApi>,
+    ui_windows: Query<(Entity, &UiWindow)>,
 ) {
     let Some(pending) = pending else {
         return;
@@ -74,6 +77,15 @@ pub fn transition_scene(
     {
         commands.entity(entity).despawn();
     }
+    // UI windows are scene-agnostic names over live entities: scene
+    // changes close them all; a still-open world menu re-declares
+    // itself on the next tick.
+    close_all(
+        &ui,
+        &mut commands,
+        ui_windows.iter().map(|(entity, _)| entity),
+    );
+
     for (entity, mut script, broken) in &mut scene_scripts {
         let SceneScript { runtime, scope, .. } = &mut *script;
         // Broken scripts already warned once; their on_exit is skipped
@@ -114,6 +126,7 @@ pub fn apply_scene(
     spawn: Option<Res<PlayerSpawn>>,
     mut players: Query<&mut Transform, With<Player>>,
     input: Res<InputManager>,
+    ui: Res<UiApi>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -197,6 +210,7 @@ pub fn apply_scene(
         scene,
         scene.camera_forward(),
         &input.handle(),
+        &ui,
     );
 
     // The scene's script, if the file declares one; run_scene_scripts
@@ -204,7 +218,7 @@ pub fn apply_scene(
     if let Some(runtime) = scene
         .script
         .as_deref()
-        .and_then(|path| SceneScriptRuntime::load(path, &input.handle()))
+        .and_then(|path| SceneScriptRuntime::load(path, &input.handle(), &ui))
     {
         commands.spawn((SceneScript {
             runtime,
@@ -407,6 +421,7 @@ mod tests {
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
         world.insert_resource(server);
+        world.insert_resource(crate::systems::ui::UiApi::new());
         let handle = assets.add(test_scene(Some("backgrounds/room1.png")));
         world.insert_resource(assets);
         world.insert_resource(CurrentScene {
@@ -474,6 +489,7 @@ mod tests {
     fn world_for_apply(scene: Scene, player_spawn: Option<Vec2>) -> World {
         let mut world = World::new();
         world.insert_resource(crate::input::InputManager::standard());
+        world.insert_resource(crate::systems::ui::UiApi::new());
         world.insert_resource(crate::systems::party::Party::default());
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();

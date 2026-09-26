@@ -190,15 +190,15 @@ fn tail_color(theme: &BubbleTheme) -> Color {
 /// once by `setup` from the theme.
 #[derive(Resource, Clone)]
 pub(crate) struct BubbleAssets {
-    rect: Handle<Mesh>,
+    pub(crate) rect: Handle<Mesh>,
     tail: Handle<Mesh>,
     tail_inset: Handle<Mesh>,
     /// Solid border + tail-border color.
-    border: Handle<ColorMaterial>,
+    pub(crate) border: Handle<ColorMaterial>,
     /// Tail fill: the theme's corner average, so it blends into the box.
-    tail_fill: Handle<ColorMaterial>,
+    pub(crate) tail_fill: Handle<ColorMaterial>,
     /// Shared fill gradient; restyled in place on theme changes.
-    fill: Handle<GradientMaterial>,
+    pub(crate) fill: Handle<GradientMaterial>,
     /// The theme these handles currently reflect; `sync_theme` compares
     /// against it to catch theme changes without relying on change
     /// detection, which bare-world tests can't exercise.
@@ -608,7 +608,7 @@ fn set_scale(transform: &mut Transform, progress: f32) {
 
 /// Virtual-screen pixels (origin top-left, y-down) to Camera2d world
 /// coordinates (origin center, y-up).
-fn screen_to_world(at: Vec2) -> Vec2 {
+pub(crate) fn screen_to_world(at: Vec2) -> Vec2 {
     Vec2::new(
         at.x - GAME_WIDTH as f32 / 2.0,
         GAME_HEIGHT as f32 / 2.0 - at.y,
