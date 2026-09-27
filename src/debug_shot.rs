@@ -57,14 +57,70 @@ fn scan_shot_requests(dir: &Path) -> Vec<String> {
 /// Serves every pending request: read the clean game image back from
 /// the GPU, delete the request. The PNG lands when the readback
 /// completes, a frame or two later.
+#[allow(clippy::too_many_arguments)]
 pub fn check_requests(
     mut commands: Commands,
     dir: Option<Res<ShotDir>>,
     game_image: Option<Res<GameImage>>,
+    state: Option<Res<crate::world_state::WorldState>>,
+    mut characters: Query<(
+        Entity,
+        &crate::systems::animation::CharacterAnimations,
+        &mut crate::systems::animation::CharacterAnimator,
+    )>,
+    mut anim_players: Query<&mut bevy::animation::AnimationPlayer>,
 ) {
     let (Some(dir), Some(game_image)) = (dir, game_image) else {
         return;
     };
+    // `dump-state-<nonce>.request`: write the world state out as text,
+    // so store persistence can be verified across scene changes.
+    for nonce in scan_requests(&dir.0, "dump-state-") {
+        let request = dir.0.join(format!("dump-state-{nonce}.request"));
+        if std::fs::remove_file(&request).is_err() {
+            continue;
+        }
+        let out = dir.0.join(format!("state-{nonce}.txt"));
+        if let Some(state) = &state {
+            let shared = state.shared();
+            let shared = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let scripts = state.debug_stores();
+            let scripts = scripts
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut lines = vec![format!("shared: {shared:?}")];
+            for (k, v) in scripts.iter() {
+                lines.push(format!("{k}: {:?}", v.lock().unwrap()));
+            }
+            for (entity, animations, animator) in &mut characters {
+                lines.push(format!(
+                    "anim {:?}: {:?} {}",
+                    entity.index(),
+                    animations.debug_clips(),
+                    animator.debug()
+                ));
+                if let Some(player_entity) = animator.debug_player()
+                    && let Ok(player) = anim_players.get_mut(player_entity)
+                {
+                    for (node, animation) in player.playing_animations() {
+                        lines.push(format!(
+                            "  player {:?} node#{}: seek={:?} finished={} paused={} weight={}",
+                            player_entity.index(),
+                            node.index(),
+                            animation.seek_time(),
+                            animation.is_finished(),
+                            animation.is_paused(),
+                            animation.weight(),
+                        ));
+                    }
+                }
+            }
+            let text = lines.join("\n");
+            let _ = std::fs::write(&out, text);
+        }
+    }
     for nonce in scan_shot_requests(&dir.0) {
         let request = dir.0.join(format!("shot-{nonce}.request"));
         match std::fs::remove_file(&request) {

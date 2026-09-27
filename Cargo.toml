@@ -18,7 +18,7 @@ bevy_egui = "0.42"
 # default); wired to the game by hand since bevy_mod_scripting doesn't
 # support Bevy 0.19 yet. `sync` makes ASTs/Scopes Send+Sync so they can
 # live in components.
-rhai = { version = "1.21", features = ["sync"] }
+rhai = { version = "1.21", features = ["sync", "serde"] }
 ron = "0.12"
 serde = { version = "1", features = ["derive"] }
 # Same major version bevy_image pulls in, PNG-only: encodes debug

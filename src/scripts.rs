@@ -30,6 +30,14 @@
 //! `emote(name)` to play one of the model's one-shot clips. There is
 //! no file or network access; scripts can only compute.
 //!
+//! Every tier also owns persistent state: `remember(key, value)` /
+//! `recall(key)` read the script instance's private store — keyed by
+//! the actor's game-wide id when it has one (shared across scenes with
+//! `shared: true`, scene-scoped otherwise), else by script path — and
+//! `remember_global` / `recall_global` read the one store every script
+//! shares, the future save file. `param(key)` reads the actor's
+//! scene-declared parameters. Missing keys read as `()`.
+//!
 //! Each runtime is called with a caller-owned [`Scope`] that persists
 //! script state between calls.
 
@@ -43,6 +51,7 @@ use rhai::{Dynamic, Engine, Map, Position, Scope};
 
 use crate::input::InputHandle;
 use crate::systems::ui::UiApi;
+use crate::world_state::{SharedMap, WorldState};
 
 /// What an actor's `say` call produced: the line plus how it should be
 /// shown.
@@ -126,6 +135,9 @@ pub struct Tick {
     pub said: Vec<Said>,
     /// The clip name from the last `emote` call this update, if any.
     pub emote: Option<String>,
+    /// The last `pose(name)` this tick: snap to a clip's final frame
+    /// and hold it (no animation) — how props stay open.
+    pub pose: Option<String>,
     /// Party changes the script requested this update.
     pub party: Vec<PartyCommand>,
 }
@@ -137,6 +149,62 @@ pub struct ScriptBroken;
 
 /// What a script runtime call reports.
 type ScriptError = Box<rhai::EvalAltResult>;
+
+/// Everything a script engine binds against: the shared handles every
+/// tier gets, plus this instance's private store and parameters.
+///
+/// Build the shared part once (`new`), then specialize per script
+/// instance (`with_store` / `with_params`); `Clone` is cheap — it's all
+/// handles.
+#[derive(Clone)]
+pub struct ScriptEnv {
+    input: InputHandle,
+    ui: UiApi,
+    state: WorldState,
+    store: SharedMap,
+    params: BTreeMap<String, Dynamic>,
+}
+
+impl ScriptEnv {
+    /// The shared part: input, UI, and world state. The store starts
+    /// detached (fresh, unpersisted) until a caller specializes it.
+    pub fn new(input: InputHandle, ui: UiApi, state: WorldState) -> Self {
+        let store = state.store_for("\0detached");
+        Self {
+            input,
+            ui,
+            state,
+            store,
+            params: BTreeMap::new(),
+        }
+    }
+
+    /// Binds this script instance to its persistent store. The key is
+    /// the identity: `"actor::<id>"` for shared actors,
+    /// `"<scene>::<id>"` for scene-local ones, the script path
+    /// otherwise.
+    pub fn with_store(mut self, key: &str) -> Self {
+        self.store = self.state.store_for(key);
+        self
+    }
+
+    /// Hands the script its instance parameters (from the scene RON).
+    pub fn with_params(mut self, params: BTreeMap<String, Dynamic>) -> Self {
+        self.params = params;
+        self
+    }
+
+    /// A test-only environment: detached input, fresh UI and state, no
+    /// persistence.
+    #[cfg(test)]
+    pub fn detached() -> Self {
+        Self::new(
+            crate::input::detached(),
+            UiApi::new(),
+            WorldState::default(),
+        )
+    }
+}
 
 /// A compiled Rhai script: an engine carrying the tier's host
 /// functions plus the AST, ready to call entry points against a
@@ -150,6 +218,12 @@ impl CompiledScript {
     /// Compiles script text on an engine configured by `register`.
     fn compile(text: &str, register: impl FnOnce(&mut Engine)) -> Result<Self, rhai::ParseError> {
         let mut engine = Engine::new();
+        // The default expression-depth budget is tight enough that a
+        // `say` with a couple of string concatenations and an options
+        // map breaches it; ours are small trusted scripts, so give the
+        // parser room (the limit exists to guard against stack
+        // overflows, not to shape style).
+        engine.set_max_expr_depths(512, 512);
         register(&mut engine);
         let ast = engine.compile(text)?;
         Ok(Self { engine, ast })
@@ -367,7 +441,12 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
 /// Registers the per-script state store: `remember(key, value)` writes
 /// and `recall(key)` reads back, persisting for the script's lifetime.
 /// Values live only in the script's own map — private by design.
-fn register_state_api(engine: &mut Engine, store: &Arc<Mutex<BTreeMap<String, Dynamic>>>) {
+fn register_state_api(
+    engine: &mut Engine,
+    store: &SharedMap,
+    shared: &SharedMap,
+    params: &BTreeMap<String, Dynamic>,
+) {
     let saved = store.clone();
     engine.register_fn("remember", move |key: &str, value: Dynamic| {
         saved
@@ -384,6 +463,26 @@ fn register_state_api(engine: &mut Engine, store: &Arc<Mutex<BTreeMap<String, Dy
             .cloned()
             .unwrap_or(Dynamic::UNIT)
     });
+    let global = shared.clone();
+    engine.register_fn("remember_global", move |key: &str, value: Dynamic| {
+        global
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.to_owned(), value);
+    });
+    let global = shared.clone();
+    engine.register_fn("recall_global", move |key: &str| -> Dynamic {
+        global
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+            .unwrap_or(Dynamic::UNIT)
+    });
+    let instance_params = params.clone();
+    engine.register_fn("param", move |key: &str| -> Dynamic {
+        instance_params.get(key).cloned().unwrap_or(Dynamic::UNIT)
+    });
 }
 
 /// The actor tier's runtime: compiled script plus the `say`/`waiting`
@@ -394,6 +493,8 @@ pub struct ActorScript {
     said: Arc<Mutex<Vec<Said>>>,
     /// `emote` records here; last call per update wins.
     emote: Arc<Mutex<Option<String>>>,
+    /// `pose` records here; last call per update wins.
+    pose: Arc<Mutex<Option<String>>>,
     /// Party mutator calls collect here; drained once per update.
     party: Arc<Mutex<Vec<PartyCommand>>>,
     /// Mirrored in by the host each update; read by `waiting()`.
@@ -407,28 +508,31 @@ impl ActorScript {
     /// the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
+        Self::compile_with_handle(text, ScriptEnv::detached())
     }
 
-    pub fn compile_with_handle(
-        text: &str,
-        input: InputHandle,
-        ui: UiApi,
-    ) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(text: &str, env: ScriptEnv) -> Result<Self, rhai::ParseError> {
         let said = Arc::new(Mutex::new(Vec::new()));
         let emote = Arc::new(Mutex::new(None));
+        let pose = Arc::new(Mutex::new(None));
         let party = Arc::new(Mutex::new(Vec::new()));
         let waiting = Arc::new(Mutex::new(false));
         let party_sink = party.clone();
-        let input_sink = input.clone();
-        let ui_sink = ui.clone();
-        let store = Arc::new(Mutex::new(BTreeMap::new()));
-        let store_sink = store.clone();
+        let input_sink = env.input.clone();
+        let ui_sink = env.ui.clone();
+        let store = env.store.clone();
+        let shared = env.state.shared();
+        let params = env.params.clone();
+        let pose_sink = pose.clone();
         let script = CompiledScript::compile(text, |engine| {
-            register_state_api(engine, &store_sink);
+            register_state_api(engine, &store, &shared, &params);
             register_input_api(engine, &input_sink);
             register_ui_api(engine, &ui_sink);
             register_party_api(engine, &party_sink);
+            let sink = pose_sink;
+            engine.register_fn("pose", move |name: &str| {
+                *sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(name.to_owned());
+            });
             let sink = said.clone();
             engine.register_fn("say", move |line: &str| {
                 sink.lock()
@@ -462,6 +566,7 @@ impl ActorScript {
             script,
             said,
             emote,
+            pose,
             party,
             waiting,
         })
@@ -471,11 +576,9 @@ impl ActorScript {
     /// warning) when unreadable or non-compiling, so the actor runs
     /// without it. `input` is the manager's shared state handle; `ui`
     /// the shared UI API.
-    pub fn load(path: &str, input: &InputHandle, ui: &UiApi) -> Option<Self> {
-        let handle = input.clone();
-        let ui = ui.clone();
+    pub fn load(path: &str, env: ScriptEnv) -> Option<Self> {
         load_script_file(path, "Actor", move |text| {
-            Self::compile_with_handle(text, handle.clone(), ui.clone())
+            Self::compile_with_handle(text, env.clone())
         })
     }
 
@@ -528,6 +631,10 @@ impl ActorScript {
             let mut emote = self.emote.lock().unwrap_or_else(PoisonError::into_inner);
             std::mem::take(&mut *emote)
         };
+        let pose = {
+            let mut pose = self.pose.lock().unwrap_or_else(PoisonError::into_inner);
+            std::mem::take(&mut *pose)
+        };
         let party = std::mem::take(
             self.party
                 .lock()
@@ -538,6 +645,7 @@ impl ActorScript {
             position,
             said,
             emote,
+            pose,
             party,
         })
     }
@@ -555,23 +663,20 @@ impl SceneScript {
     /// contract checks); the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
+        Self::compile_with_handle(text, ScriptEnv::detached())
     }
 
-    pub fn compile_with_handle(
-        text: &str,
-        input: InputHandle,
-        ui: UiApi,
-    ) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(text: &str, env: ScriptEnv) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
-        let input_sink = input.clone();
-        let ui_sink = ui.clone();
-        let store = Arc::new(Mutex::new(BTreeMap::new()));
-        let store_sink = store.clone();
+        let input_sink = env.input.clone();
+        let ui_sink = env.ui.clone();
+        let store = env.store.clone();
+        let shared = env.state.shared();
+        let params = env.params.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
-                register_state_api(engine, &store_sink);
+                register_state_api(engine, &store, &shared, &params);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
@@ -583,11 +688,9 @@ impl SceneScript {
     /// Loads a scene script from the assets folder: `None` (after a
     /// warning) when unreadable or non-compiling, so the scene runs
     /// without it.
-    pub fn load(path: &str, input: &InputHandle, ui: &UiApi) -> Option<Self> {
-        let handle = input.clone();
-        let ui = ui.clone();
+    pub fn load(path: &str, env: ScriptEnv) -> Option<Self> {
         load_script_file(path, "Scene", move |text| {
-            Self::compile_with_handle(text, handle.clone(), ui.clone())
+            Self::compile_with_handle(text, env.clone())
         })
     }
 
@@ -660,23 +763,20 @@ impl WorldScript {
     /// contract checks); the game loads via [`Self::load`].
     #[cfg(test)]
     pub fn compile(text: &str) -> Result<Self, rhai::ParseError> {
-        Self::compile_with_handle(text, crate::input::detached(), UiApi::new())
+        Self::compile_with_handle(text, ScriptEnv::detached())
     }
 
-    pub fn compile_with_handle(
-        text: &str,
-        input: InputHandle,
-        ui: UiApi,
-    ) -> Result<Self, rhai::ParseError> {
+    pub fn compile_with_handle(text: &str, env: ScriptEnv) -> Result<Self, rhai::ParseError> {
         let party = Arc::new(Mutex::new(Vec::new()));
         let party_sink = party.clone();
-        let input_sink = input.clone();
-        let ui_sink = ui.clone();
-        let store = Arc::new(Mutex::new(BTreeMap::new()));
-        let store_sink = store.clone();
+        let input_sink = env.input.clone();
+        let ui_sink = env.ui.clone();
+        let store = env.store.clone();
+        let shared = env.state.shared();
+        let params = env.params.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine| {
-                register_state_api(engine, &store_sink);
+                register_state_api(engine, &store, &shared, &params);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
@@ -1111,8 +1211,7 @@ mod tests {
                 stick = axis("left_stick_x");
             }
             "#,
-            manager.handle(),
-            UiApi::new(),
+            ScriptEnv::new(manager.handle(), UiApi::new(), WorldState::default()),
         )
         .unwrap();
         let mut scope = Scope::new();
@@ -1127,8 +1226,7 @@ mod tests {
         // Unknown action names are strict errors, not silent falses.
         let script = ActorScript::compile_with_handle(
             r#"fn on_update(x, z, player_x, player_z, dt) { bogused = pressed("south"); }"#,
-            manager.handle(),
-            UiApi::new(),
+            ScriptEnv::new(manager.handle(), UiApi::new(), WorldState::default()),
         )
         .unwrap();
         assert!(
@@ -1154,8 +1252,7 @@ mod tests {
                 if ui_confirmed("menu") >= 0 { chose = 1; }
             }
             "#,
-            crate::input::detached(),
-            api.clone(),
+            ScriptEnv::new(crate::input::detached(), api.clone(), WorldState::default()),
         )
         .unwrap();
         let mut scope = Scope::new();
@@ -1261,9 +1358,119 @@ mod tests {
 
     #[test]
     fn load_reads_a_shipped_script_and_missing_paths_warn_to_none() {
-        let input = crate::input::detached();
-        let ui = crate::systems::ui::UiApi::new();
-        assert!(ActorScript::load("scripts/test.rhai", &input, &ui).is_some());
-        assert!(ActorScript::load("scripts/does-not-exist.rhai", &input, &ui).is_none());
+        let env = || ScriptEnv::detached();
+        assert!(ActorScript::load("scripts/test.rhai", env()).is_some());
+        assert!(ActorScript::load("scripts/does-not-exist.rhai", env()).is_none());
+    }
+    #[test]
+    fn scripts_sharing_an_identity_share_their_store() {
+        let base = ScriptEnv::new(
+            crate::input::detached(),
+            UiApi::new(),
+            WorldState::default(),
+        );
+        let script = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if recall("visits") == () {
+                    remember("visits", 1);
+                } else {
+                    remember("visits", recall("visits") + 1);
+                }
+            }
+            "#,
+            base.clone().with_store("actor::merchant"),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+
+        // A second runtime bound to the same identity sees the same
+        // store: leave the scene, come back, the memory is still there.
+        let again = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if recall("visits") == () { seen = 0; } else { seen = recall("visits"); }
+            }
+            "#,
+            base.clone().with_store("actor::merchant"),
+        )
+        .unwrap();
+        let mut other = Scope::new();
+        other.push("seen", 0_i64);
+        again.update(&mut other, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(other.get_value::<i64>("seen"), Some(2));
+
+        // A different identity is isolated.
+        let stranger = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                if recall("visits") == () { seen = 0; } else { seen = recall("visits"); }
+            }
+            "#,
+            base.with_store("actor::other"),
+        )
+        .unwrap();
+        let mut theirs = Scope::new();
+        theirs.push("seen", 0_i64);
+        stranger
+            .update(&mut theirs, 0.0, 0.0, 0.0, 0.0, 0.5)
+            .unwrap();
+        assert_eq!(theirs.get_value::<i64>("seen"), Some(0));
+    }
+
+    #[test]
+    fn the_global_store_is_visible_across_identities() {
+        let base = ScriptEnv::new(
+            crate::input::detached(),
+            UiApi::new(),
+            WorldState::default(),
+        );
+        let writer = ActorScript::compile_with_handle(
+            r#"fn on_update(x, z, player_x, player_z, dt) { remember_global("met.goblin", true); }"#,
+            base.clone().with_store("a"),
+        )
+        .unwrap();
+        let reader = ActorScript::compile_with_handle(
+            r#"fn on_update(x, z, player_x, player_z, dt) { met = recall_global("met.goblin"); }"#,
+            base.with_store("b"),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        writer.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        let mut scope = Scope::new();
+        scope.push("met", false);
+        reader.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<bool>("met"), Some(true));
+    }
+
+    #[test]
+    fn params_reach_the_script_as_typed_values() {
+        let mut params = BTreeMap::new();
+        params.insert("item".to_owned(), "potion".into());
+        params.insert("gold".to_owned(), 50.into());
+        let script = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                found = param("item");
+                rich = param("gold") + 10;
+                missing = param("nothing") == ();
+            }
+            "#,
+            ScriptEnv::detached().with_params(params),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("found", "");
+        scope.push("rich", 0_i64);
+        scope.push("missing", false);
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(
+            scope.get_value::<String>("found").as_deref(),
+            Some("potion")
+        );
+        assert_eq!(scope.get_value::<i64>("rich"), Some(60));
+        assert_eq!(scope.get_value::<bool>("missing"), Some(true));
     }
 }

@@ -5,9 +5,12 @@
 //
 // The stats block is a placeholder until the world-state store exists
 // (no HP/MP data and no party read API yet) — the menu mechanics are
-// all real. Menu state lives in this script's own store: plain
-// variables can't be assigned before they exist, but `remember` /
-// `recall` persist across ticks.
+// all real. One thing it does read for real: the shared global store,
+// where the devroom goblin announces your meetings.
+//
+// Menu state lives in this script's own store: plain variables can't
+// be assigned before they exist, but `remember` / `recall` persist
+// across ticks.
 
 fn on_update(dt) {
     if just_pressed("triangle") && recall("open") != true {
@@ -26,6 +29,9 @@ fn on_update(dt) {
     ui_bar("menu", 28.0, 26.0, 60.0, 0.9);
     ui_text("menu", "MP", 8.0, 40.0);
     ui_bar("menu", 28.0, 42.0, 40.0, 0.55);
+    if recall_global("met.goblin") == true {
+        ui_text("menu", "Goblin: befriended", 8.0, 58.0);
+    }
     ui_options("menu", 110.0, 8.0, labels);
 
     let picked = ui_confirmed("menu");

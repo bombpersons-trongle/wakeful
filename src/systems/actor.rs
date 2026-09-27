@@ -8,7 +8,6 @@ use rhai::Scope;
 
 use crate::GameCamera;
 use crate::Player;
-use crate::input::InputHandle;
 use crate::movement::{TURN_SPEED, face_direction, facing_rotation};
 use crate::scene::Scene;
 use crate::scripts::{ActorScript, Said, ScriptBroken};
@@ -16,7 +15,6 @@ use crate::systems::animation::{EmoteRequest, Locomotion, PendingAnimations};
 use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::party::Party;
 use crate::systems::scene::gltf_asset_path;
-use crate::systems::ui::UiApi;
 use crate::text::TextAssets;
 
 /// How long a scripted line stays up before closing itself.
@@ -24,6 +22,12 @@ const SAY_TTL_SECS: f32 = 3.0;
 /// Screen pixels between the actor's projected ground point and the
 /// bubble's center, lifting the bubble above the model.
 const SAY_HEADROOM_PX: f32 = 24.0;
+
+/// Marks an actor whose script has run at least once. The animation
+/// driver keeps a freshly loaded model hidden until this lands (or a
+/// clip is applied), so a revisited scene never flashes the bind pose.
+#[derive(Component, Default)]
+pub(crate) struct ScriptTicked;
 
 /// Marks a scene actor. The optional script runtime is disabled once it
 /// errors, so a broken file can't spam warnings every tick.
@@ -70,14 +74,28 @@ pub(crate) fn spawn_actors(
     assets: &AssetServer,
     scene: &Scene,
     toward: Vec2,
-    input: &InputHandle,
-    ui: &UiApi,
+    scene_path: &str,
+    env: &crate::scripts::ScriptEnv,
 ) {
     for actor in &scene.actors {
+        // Storage identity: game-wide id when set (shared across
+        // scenes on request), else the script path.
         let script = actor
             .script
             .as_deref()
-            .and_then(|path| ActorScript::load(path, input, ui))
+            .and_then(|path| {
+                let key = match actor.id.as_deref() {
+                    Some(id) if actor.shared => format!("actor::{id}"),
+                    Some(id) => format!("{scene_path}::{id}"),
+                    None => path.to_owned(),
+                };
+                ActorScript::load(
+                    path,
+                    env.clone()
+                        .with_store(&key)
+                        .with_params(actor.params.clone()),
+                )
+            })
             .map(|script| ScriptRuntime {
                 script,
                 scope: Scope::new(),
@@ -89,9 +107,18 @@ pub(crate) fn spawn_actors(
                 said: None,
             },
             Locomotion::default(),
+            // No script to tick: the driver's reveal marker would
+            // never land, so show script-less models from the start.
+            ScriptTicked,
             ActorModel(assets.load(gltf_asset_path(&actor.model))),
-            Transform::from_xyz(actor.position[0], 0.0, actor.position[1])
-                .with_rotation(facing_rotation(toward)),
+            // A pinned facing turns the model to a world yaw; otherwise
+            // the actor looks the way the scene camera looks.
+            Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
+                match actor.facing {
+                    Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
+                    None => facing_rotation(toward),
+                },
+            ),
         ));
     }
 }
@@ -163,6 +190,8 @@ pub(crate) fn run_actor_scripts(
         let Some(runtime) = actor.script.as_mut() else {
             continue;
         };
+        // The model reveal waits for this (see ScriptTicked).
+        commands.entity(entity).insert(ScriptTicked);
         runtime.script.set_waiting(waiting);
         match runtime.script.update(
             &mut runtime.scope,
@@ -189,8 +218,11 @@ pub(crate) fn run_actor_scripts(
                         .is_some_and(|[x, z]| (x - from.x).abs() + (z - from.y).abs() > 1e-6);
                     locomotion.running = false;
                 }
-                if let Some(name) = tick.emote {
-                    commands.entity(entity).insert(EmoteRequest(Some(name)));
+                if tick.emote.is_some() || tick.pose.is_some() {
+                    commands.entity(entity).insert(EmoteRequest {
+                        emote: tick.emote,
+                        pose: tick.pose,
+                    });
                 }
                 party.apply(&tick.party);
                 if !tick.said.is_empty() {
@@ -396,18 +428,23 @@ mod tests {
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
                 position: [1.0, 2.0],
+                id: None,
+                shared: false,
+                params: std::collections::BTreeMap::new(),
                 script: None,
+                facing: None,
             }],
         };
         let server = world.resource::<AssetServer>().clone();
         let mut commands = world.commands();
+        let env = crate::scripts::ScriptEnv::detached();
         spawn_actors(
             &mut commands,
             &server,
             &scene,
             Vec2::NEG_Y,
-            &crate::input::detached(),
-            &crate::systems::ui::UiApi::new(),
+            "scenes/test.scene",
+            &env,
         );
         world.flush();
 
@@ -416,6 +453,57 @@ mod tests {
         assert_eq!(transform.translation, Vec3::new(1.0, 0.0, 2.0));
         let front = transform.rotation * Vec3::Z;
         assert!(front.abs_diff_eq(Vec3::NEG_Z, 1e-5));
+    }
+
+    #[test]
+    fn a_pinned_facing_overrides_the_camera_facing() {
+        IoTaskPool::get_or_init(TaskPool::new);
+        ComputeTaskPool::get_or_init(TaskPool::new);
+        let mut world = World::new();
+        let server = test_asset_server();
+        let gltfs = Assets::<Gltf>::default();
+        server.register_asset(&gltfs);
+        world.insert_resource(server);
+        world.insert_resource(gltfs);
+
+        let scene = Scene {
+            background: None,
+            camera: crate::scene::CameraPose {
+                position: [0.0, 6.0, 9.0],
+                target: [0.0, 0.0, 0.0],
+                fov_degrees: 45.0,
+            },
+            walkable: None,
+            teleporters: Vec::new(),
+            script: None,
+            actors: vec![crate::scene::Actor {
+                model: "models/goblin.glb".into(),
+                position: [1.0, 2.0],
+                id: None,
+                shared: false,
+                params: std::collections::BTreeMap::new(),
+                script: None,
+                facing: Some(90.0),
+            }],
+        };
+        let server = world.resource::<AssetServer>().clone();
+        let mut commands = world.commands();
+        let env = crate::scripts::ScriptEnv::detached();
+        spawn_actors(
+            &mut commands,
+            &server,
+            &scene,
+            Vec2::NEG_Y,
+            "scenes/test.scene",
+            &env,
+        );
+        world.flush();
+
+        let mut actors = world.query::<&Transform>();
+        let transform = actors.single(&world).unwrap();
+        // 90° of world yaw turns the +Z front toward +X.
+        let front = transform.rotation * Vec3::Z;
+        assert!(front.abs_diff_eq(Vec3::X, 1e-5));
     }
 
     #[test]

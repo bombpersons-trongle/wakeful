@@ -5,7 +5,9 @@
 use bevy::asset::Asset;
 use bevy::math::Vec2;
 use bevy::reflect::TypePath;
+use rhai::Dynamic;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Asset, TypePath, Deserialize, Serialize)]
 pub struct Scene {
@@ -61,13 +63,30 @@ impl Teleporter {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+#[derive(Deserialize, Serialize, Debug)]
 pub struct Actor {
+    /// Optional game-wide identity: the key this actor's private
+    /// script storage lives under. Two actors with the same id share
+    /// memory wherever they appear.
+    pub id: Option<String>,
+    /// With an id, share its storage across scenes instead of scoping
+    /// it to this one.
+    #[serde(default)]
+    pub shared: bool,
+    /// Per-instance parameters the script reads with `param(key)`.
+    #[serde(default)]
+    pub params: BTreeMap<String, Dynamic>,
     /// glTF model path relative to `assets/` (default scene used, a
     /// `#SceneN` suffix, if present, is ignored).
     pub model: String,
     /// Ground-plane XZ position.
     pub position: [f32; 2],
+    /// World yaw in degrees for the spawned model. `None` (the
+    /// default) faces the scene camera's forward; a value pins the
+    /// actor to a world facing — props like chests read better from
+    /// a fixed angle.
+    #[serde(default)]
+    pub facing: Option<f32>,
     /// Rhai script file relative to `assets/`. The script's
     /// `on_update(x, z, player_x, player_z, dt)` runs every fixed tick;
     /// returning `[x, z]` moves the actor there, returning nothing keeps
@@ -516,29 +535,53 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_devroom_actor_runs_a_contract_abiding_script() {
+    fn the_shipped_devroom_actors_run_contract_abiding_scripts() {
         let devroom: Scene = ron::from_str(include_str!("../assets/scenes/devroom.scene")).unwrap();
-        let [actor] = &devroom.actors[..] else {
-            panic!("devroom ships exactly one test actor");
+        let [goblin, entrance, corner] = &devroom.actors[..] else {
+            panic!("devroom ships the goblin and two chests");
         };
-        assert_eq!(actor.model, "models/goblin.glb");
-        assert_eq!(actor.script.as_deref(), Some("scripts/test.rhai"));
         let grid = devroom
             .walkable
             .as_ref()
             .expect("devroom needs a walkable grid");
-        assert!(grid.is_walkable(actor.position[0], actor.position[1]));
 
-        let script =
-            crate::scripts::ActorScript::compile(include_str!("../assets/scripts/test.rhai"))
-                .expect("the shipped actor script must compile");
+        // The goblin: private memory under its game-wide id.
+        assert_eq!(goblin.model, "models/goblin.glb");
+        assert_eq!(goblin.id.as_deref(), Some("goblin"));
+        assert_eq!(goblin.script.as_deref(), Some("scripts/goblin.rhai"));
+        assert!(grid.is_walkable(goblin.position[0], goblin.position[1]));
+
+        // The chests: one script, two identities, two contents.
+        for (chest, item) in [(entrance, "a health potion"), (corner, "an elixir")] {
+            assert_eq!(chest.model, "models/chest.glb");
+            assert_eq!(chest.script.as_deref(), Some("scripts/chest.rhai"));
+            assert!(chest.id.is_some(), "a chest without an id shares memory");
+            assert!(!chest.shared, "chests are scene-local");
+            assert_eq!(
+                chest
+                    .params
+                    .get("item")
+                    .and_then(|v| v.clone().into_string().ok()),
+                Some(item.to_owned())
+            );
+            assert!(grid.is_walkable(chest.position[0], chest.position[1]));
+        }
+
+        // Both scripts compile and answer the actor contract.
+        let goblin_script =
+            crate::scripts::ActorScript::compile(include_str!("../assets/scripts/goblin.rhai"))
+                .expect("the shipped goblin script must compile");
+        let chest_script =
+            crate::scripts::ActorScript::compile(include_str!("../assets/scripts/chest.rhai"))
+                .expect("the shipped chest script must compile");
         let mut scope = rhai::Scope::new();
-        // Far from the player it closes in; close by it stays put.
-        let moved = script
+        // Far from the player the goblin closes in; close by it stays
+        // put.
+        let moved = goblin_script
             .update(
                 &mut scope,
-                actor.position[0],
-                actor.position[1],
+                goblin.position[0],
+                goblin.position[1],
                 0.0,
                 0.0,
                 1.0 / 60.0,
@@ -546,21 +589,35 @@ mod tests {
             .unwrap()
             .position
             .expect("the goblin approaches a far player");
-        assert!(moved[0] > actor.position[0] && moved[1] < actor.position[1]);
+        assert!(moved[0] > goblin.position[0] && moved[1] < goblin.position[1]);
         assert_eq!(
-            script
+            goblin_script
                 .update(
                     &mut scope,
-                    actor.position[0],
-                    actor.position[1],
-                    actor.position[0],
-                    actor.position[1],
+                    goblin.position[0],
+                    goblin.position[1],
+                    goblin.position[0],
+                    goblin.position[1],
                     1.0 / 60.0,
                 )
                 .unwrap()
                 .position,
             None
         );
+        // A chest with nobody nearby holds still and stays shut.
+        let (chest_x, chest_z) = (entrance.position[0], entrance.position[1]);
+        let tick = chest_script
+            .update(
+                &mut scope,
+                chest_x,
+                chest_z,
+                chest_x + 50.0,
+                chest_z + 50.0,
+                1.0 / 60.0,
+            )
+            .unwrap();
+        assert_eq!(tick.position, None);
+        assert!(tick.emote.is_none());
     }
 
     #[test]
@@ -639,11 +696,19 @@ mod tests {
         scene.actors = vec![Actor {
             model: "models/goblin.glb".into(),
             position: [1.0, 2.0],
+            id: Some("goblin".into()),
+            shared: false,
+            params: BTreeMap::new(),
             script: Some("scripts/goblin.rhai".into()),
+            facing: None,
         }];
         let text = ron::ser::to_string_pretty(&scene, ron::ser::PrettyConfig::default()).unwrap();
         let reparsed: Scene = ron::from_str(&text).unwrap();
-        assert_eq!(reparsed.actors, scene.actors);
+        // Actor holds Dynamic params, which have no structural
+        // equality; the round trip is checked through the format.
+        let again =
+            ron::ser::to_string_pretty(&reparsed, ron::ser::PrettyConfig::default()).unwrap();
+        assert_eq!(again, text);
     }
 
     #[test]

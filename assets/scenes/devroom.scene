@@ -20,13 +20,33 @@
         ],
     )),
     background: Some("backgrounds/carlisle.png"),
-    // Test actor: the goblin runs scripts/test.rhai, which makes it
-    // trail the player around the room.
+    // Actors: the goblin trails the player and counts your meetings;
+    // the two chests share one script but carry their own identity
+    // (private memory) and contents (params.item).
     actors: [
         (
             model: "models/goblin.glb",
             position: (-2.0, 2.0),
-            script: Some("scripts/test.rhai"),
+            id: Some("goblin"),
+            script: Some("scripts/goblin.rhai"),
+        ),
+        (
+            model: "models/chest.glb",
+            position: (-2.0, 0.0),
+            id: Some("entrance-chest"),
+            params: {"item": "a health potion"},
+            // Front to the camera: the lid swings toward you and the
+            // open interior reads.
+            facing: Some(180.0),
+            script: Some("scripts/chest.rhai"),
+        ),
+        (
+            model: "models/chest.glb",
+            position: (0.0, 2.0),
+            id: Some("corner-chest"),
+            params: {"item": "an elixir"},
+            facing: Some(90.0),
+            script: Some("scripts/chest.rhai"),
         ),
     ],
     // Test teleporter: walk right from the spawn point into the strip on

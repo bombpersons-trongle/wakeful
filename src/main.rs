@@ -11,6 +11,7 @@ mod screen;
 mod scripts;
 mod systems;
 mod text;
+mod world_state;
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
@@ -139,6 +140,7 @@ fn main() {
     .init_resource::<Axis<GamepadAxis>>()
     .insert_resource(InputManager::load())
     .insert_resource(ui::UiApi::new())
+    .insert_resource(world_state::WorldState::default())
     .init_resource::<ui::UiPause>()
     .init_resource::<crate::input::InjectedInputs>()
     .insert_resource(party::Party::default())

@@ -8,10 +8,13 @@ use bevy::prelude::*;
 use rhai::Scope;
 
 use crate::assets::assets_root;
-use crate::input::{InputHandle, InputManager};
-use crate::scripts::{ScriptBroken, WorldScript as WorldScriptRuntime, compile_script_file};
+use crate::input::InputManager;
+use crate::scripts::{
+    ScriptBroken, ScriptEnv, WorldScript as WorldScriptRuntime, compile_script_file,
+};
 use crate::systems::party::Party;
 use crate::systems::ui::UiApi;
+use crate::world_state::WorldState;
 
 /// Where world scripts live, relative to the assets folder.
 const WORLD_SCRIPTS_DIR: &str = "scripts/world";
@@ -26,19 +29,20 @@ pub(crate) struct WorldScript {
 }
 
 /// Startup: compiles every `.rhai` file in the world scripts folder.
-pub(crate) fn startup(mut commands: Commands, input: Res<InputManager>, ui: Res<UiApi>) {
-    spawn_world_scripts(
-        &mut commands,
-        &assets_root().join(WORLD_SCRIPTS_DIR),
-        &input.handle(),
-        &ui,
-    );
+pub(crate) fn startup(
+    mut commands: Commands,
+    input: Res<InputManager>,
+    ui: Res<UiApi>,
+    state: Res<WorldState>,
+) {
+    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone());
+    spawn_world_scripts(&mut commands, &assets_root().join(WORLD_SCRIPTS_DIR), &env);
 }
 
 /// Compiles every `.rhai` file in `dir` into a world script entity, in
 /// path order. A missing or empty dir means zero world scripts, which
 /// is fine.
-fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle, ui: &UiApi) {
+fn spawn_world_scripts(commands: &mut Commands, dir: &Path, env: &ScriptEnv) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -52,10 +56,10 @@ fn spawn_world_scripts(commands: &mut Commands, dir: &Path, input: &InputHandle,
         .collect();
     paths.sort();
     for path in paths {
-        let handle = input.clone();
-        let ui = ui.clone();
+        // World scripts persist under their own (relative) path.
+        let env = env.clone().with_store(&path.to_string_lossy());
         let Some(runtime) = compile_script_file(&path, "World", move |text| {
-            WorldScriptRuntime::compile_with_handle(text, handle.clone(), ui.clone())
+            WorldScriptRuntime::compile_with_handle(text, env.clone())
         }) else {
             continue;
         };
@@ -137,10 +141,13 @@ mod tests {
 
         let mut world = World::new();
         world.insert_resource(crate::input::InputManager::standard());
-        world.insert_resource(crate::systems::ui::UiApi::new());
         let input = world.resource::<crate::input::InputManager>().handle();
-        let ui = world.resource::<crate::systems::ui::UiApi>().clone();
-        spawn_world_scripts(&mut world.commands(), &dir.0, &input, &ui);
+        let env = crate::scripts::ScriptEnv::new(
+            input,
+            crate::systems::ui::UiApi::new(),
+            WorldState::default(),
+        );
+        spawn_world_scripts(&mut world.commands(), &dir.0, &env);
         world.flush();
 
         let mut scripts = world.query::<&WorldScript>();
@@ -163,14 +170,16 @@ mod tests {
     fn a_missing_folder_means_zero_world_scripts() {
         let mut world = World::new();
         world.insert_resource(crate::input::InputManager::standard());
-        world.insert_resource(crate::systems::ui::UiApi::new());
         let input = world.resource::<crate::input::InputManager>().handle();
-        let ui = world.resource::<crate::systems::ui::UiApi>().clone();
+        let env = crate::scripts::ScriptEnv::new(
+            input,
+            crate::systems::ui::UiApi::new(),
+            WorldState::default(),
+        );
         spawn_world_scripts(
             &mut world.commands(),
             Path::new("/nonexistent/wakeful"),
-            &input,
-            &ui,
+            &env,
         );
         world.flush();
 
@@ -191,10 +200,10 @@ mod tests {
         let api = UiApi::new();
         world.insert_resource(api.clone());
         let handle = world.resource::<InputManager>().handle();
+        let env = crate::scripts::ScriptEnv::new(handle, api.clone(), WorldState::default());
         let runtime = WorldScriptRuntime::compile_with_handle(
             include_str!("../../assets/scripts/world/triangle_menu.rhai"),
-            handle.clone(),
-            api.clone(),
+            env,
         )
         .unwrap();
         world.spawn((WorldScript {
