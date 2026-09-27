@@ -32,7 +32,7 @@
         ),
         (
             model: "models/chest.glb",
-            position: (-2.0, 0.0),
+            position: (-1.5, -0.5),
             id: Some("entrance-chest"),
             params: {"item": "a health potion"},
             // Front to the camera: the lid swings toward you and the
@@ -42,7 +42,7 @@
         ),
         (
             model: "models/chest.glb",
-            position: (0.0, 2.0),
+            position: (1.5, -0.8),
             id: Some("corner-chest"),
             params: {"item": "an elixir"},
             facing: Some(90.0),
