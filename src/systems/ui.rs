@@ -17,7 +17,7 @@ use bevy::sprite::Anchor;
 
 use crate::input::{InputState, PadAxis, PadButton, digital};
 use crate::screen::UI_LAYER;
-use crate::scripts::UiRequest;
+pub(crate) use crate::scripts::UiRequest;
 use crate::systems::bubble::{BubbleAssets, BubbleTheme, screen_to_world};
 use crate::text::{TextAssets, pixel_text};
 

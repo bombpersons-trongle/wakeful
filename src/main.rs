@@ -1,9 +1,10 @@
 mod assets;
+mod battle;
 #[cfg(debug_assertions)]
 mod debug_shot;
 mod display;
-mod dither;
 mod editor;
+mod game_state;
 mod input;
 mod movement;
 mod scene;
@@ -11,9 +12,9 @@ mod screen;
 mod scripts;
 mod systems;
 mod text;
+mod transition;
 mod world_state;
 
-use bevy::core_pipeline::fullscreen_material::FullscreenMaterialPlugin;
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
 use bevy::sprite_render::Material2dPlugin;
@@ -43,7 +44,7 @@ fn load_ui_config(mut commands: Commands) {
 /// Marks the player actor; movement and model-swap systems target this
 /// entity.
 #[derive(Component)]
-struct Player;
+pub(crate) struct Player;
 
 /// Marks the fixed gameplay camera whose pose the scene controls.
 #[derive(Component)]
@@ -119,6 +120,7 @@ type GameCameraQuery<'w, 's> = Query<
 
 fn main() {
     let mut app = App::new();
+    app.init_resource::<transition::TransitionState>();
     app.add_plugins(DefaultPlugins.set(WindowPlugin {
         primary_window: Some(Window {
             title: "wakeful".into(),
@@ -128,8 +130,10 @@ fn main() {
         ..default()
     }))
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
-    .add_plugins(FullscreenMaterialPlugin::<dither::DitherPostProcess>::default())
-    .add_plugins(FullscreenMaterialPlugin::<display::CrtMaterial>::default())
+    .add_plugins(Material2dPlugin::<transition::TransitionMaterial>::default())
+    // The dither/CRT final post stays off: it is a fullscreen pass and
+    // re-enabling it needs its own verification pass.
+    // .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
     .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
     .add_plugins(editor::plugin)
     .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
@@ -141,11 +145,15 @@ fn main() {
     .insert_resource(InputManager::load())
     .insert_resource(ui::UiApi::new())
     .insert_resource(world_state::WorldState::default())
+    .insert_resource(battle::BattleHandle::new())
+    .init_resource::<battle::PendingBattleStart>()
+    .init_state::<game_state::GameState>()
     .init_resource::<ui::UiPause>()
     .init_resource::<crate::input::InjectedInputs>()
     .insert_resource(party::Party::default())
-    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ))
-    .add_systems(
+    .insert_resource(Time::<Fixed>::from_hz(FIXED_HZ));
+
+    app.add_systems(
         Startup,
         (
             screen::setup_screen,
@@ -154,6 +162,9 @@ fn main() {
             load_ui_config,
             bubble::setup,
             ui::setup,
+            transition::setup,
+            // The context roots exist before anything spawns into them.
+            scene_loader::setup_graphics,
             world::spawn_world,
             world_script::startup,
             scene_loader::load_scene,
@@ -163,11 +174,19 @@ fn main() {
     .add_systems(
         Update,
         (
+            transition::capture.run_if(in_state(game_state::GameState::Transition)),
+            transition::drive_transition,
+        )
+            .chain(),
+    )
+    .add_systems(
+        Update,
+        (
             sys_input::quit_on_escape,
+            camera::sync_camera_activation,
             screen::resize_present,
             screen::validate_post_process_layout,
             display::sync_display_effects,
-            bubble::dismiss_on_confirm,
             bubble::sync_theme,
             scene_loader::apply_scene,
             scene_loader::sync_ground,
@@ -184,23 +203,43 @@ fn main() {
     // cached applies the same frame the teleport lands.
     .add_systems(
         Update,
-        scene_loader::transition_scene.before(scene_loader::apply_scene),
+        (scene_loader::transition_scene.before(scene_loader::apply_scene),),
     )
     .add_systems(
         FixedUpdate,
         (
+            battle::battle_requests,
             crate::input::aggregate_inputs,
             ui::navigate,
-            player::move_player,
-            teleport::check_teleporters,
-            actor::run_actor_scripts,
+            bubble::dismiss_on_confirm,
+            player::move_player.run_if(in_state(game_state::GameState::Scene)),
+            teleport::check_teleporters.run_if(in_state(game_state::GameState::Scene)),
+            actor::run_actor_scripts.run_if(in_state(game_state::GameState::Scene)),
             animation::run_character_animations,
-            scene_loader::run_scene_scripts,
-            world_script::run_world_scripts,
+            scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
+            world_script::run_world_scripts
+                .run_if(not(in_state(game_state::GameState::Transition))),
+            battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
             ui::drain,
             ui::sync_cursor,
         )
             .chain(),
+    )
+    .add_systems(
+        OnEnter(game_state::GameState::Battle),
+        (battle::stage_battle, scene_loader::suspend_scene),
+    )
+    // Fires at the transition's covered point, behind the opaque cover:
+    // the battle teardown and the scene resume are never on screen.
+    // (Also fires once at boot, where both no-op harmlessly.)
+    .add_systems(
+        OnEnter(game_state::GameState::Scene),
+        (
+            battle::cleanup_battle,
+            scene_loader::resume_scene,
+            // The covered point: hand a queued scene warp to the swap.
+            teleport::release_warp,
+        ),
     );
 
     #[cfg(debug_assertions)]

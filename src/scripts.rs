@@ -163,12 +163,18 @@ pub struct ScriptEnv {
     state: WorldState,
     store: SharedMap,
     params: BTreeMap<String, Dynamic>,
+    battle: crate::battle::BattleHandle,
 }
 
 impl ScriptEnv {
     /// The shared part: input, UI, and world state. The store starts
     /// detached (fresh, unpersisted) until a caller specializes it.
-    pub fn new(input: InputHandle, ui: UiApi, state: WorldState) -> Self {
+    pub fn new(
+        input: InputHandle,
+        ui: UiApi,
+        state: WorldState,
+        battle: crate::battle::BattleHandle,
+    ) -> Self {
         let store = state.store_for("\0detached");
         Self {
             input,
@@ -176,6 +182,7 @@ impl ScriptEnv {
             state,
             store,
             params: BTreeMap::new(),
+            battle,
         }
     }
 
@@ -202,21 +209,40 @@ impl ScriptEnv {
             crate::input::detached(),
             UiApi::new(),
             WorldState::default(),
+            crate::battle::BattleHandle::new(),
         )
     }
 }
+
+/// The engine + AST pair a script runs on, shared behind an Arc so
+/// battle registrations can capture and invoke it later (the engine is
+/// not `Clone`).
+pub(crate) struct ScriptInner {
+    pub(crate) engine: Engine,
+    pub(crate) ast: rhai::AST,
+}
+
+/// Filled once compilation finishes; captured empty by host-function
+/// closures that need a late binding to this script's functions.
+pub(crate) type ScriptSource =
+    std::sync::Arc<std::sync::Mutex<Option<std::sync::Arc<ScriptInner>>>>;
 
 /// A compiled Rhai script: an engine carrying the tier's host
 /// functions plus the AST, ready to call entry points against a
 /// caller-owned scope.
 struct CompiledScript {
-    engine: Engine,
-    ast: rhai::AST,
+    source: ScriptSource,
 }
 
 impl CompiledScript {
     /// Compiles script text on an engine configured by `register`.
-    fn compile(text: &str, register: impl FnOnce(&mut Engine)) -> Result<Self, rhai::ParseError> {
+    /// The register step receives the (still empty) source cell so
+    /// host functions can capture a late binding to this script.
+    fn compile(
+        text: &str,
+        register: impl FnOnce(&mut Engine, &ScriptSource),
+    ) -> Result<Self, rhai::ParseError> {
+        let source: ScriptSource = Arc::new(Mutex::new(None));
         let mut engine = Engine::new();
         // The default expression-depth budget is tight enough that a
         // `say` with a couple of string concatenations and an options
@@ -224,9 +250,18 @@ impl CompiledScript {
         // parser room (the limit exists to guard against stack
         // overflows, not to shape style).
         engine.set_max_expr_depths(512, 512);
-        register(&mut engine);
+        // Script print() lands in the game log — diagnostics live in
+        // the same place as everything else.
+        engine.on_print(|message| bevy::log::info!("[script] {message}"));
+        register(&mut engine, &source);
         let ast = engine.compile(text)?;
-        Ok(Self { engine, ast })
+        *source.lock().unwrap_or_else(PoisonError::into_inner) =
+            Some(Arc::new(ScriptInner { engine, ast }));
+        Ok(Self { source })
+    }
+
+    fn inner(&self) -> std::sync::MutexGuard<'_, Option<Arc<ScriptInner>>> {
+        self.source.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Calls an entry point; whatever it returns comes back as a
@@ -237,12 +272,19 @@ impl CompiledScript {
         name: &str,
         args: impl rhai::FuncArgs,
     ) -> Result<Dynamic, ScriptError> {
-        self.engine.call_fn(scope, &self.ast, name, args)
+        let inner = self.inner();
+        let inner = inner.as_ref().expect("compiled script has a source");
+        inner.engine.call_fn(scope, &inner.ast, name, args)
     }
 
     /// Whether the script defines the function.
     fn defines(&self, name: &str) -> bool {
-        self.ast.iter_functions().any(|f| f.name == name)
+        self.inner()
+            .as_ref()
+            .expect("compiled script has a source")
+            .ast
+            .iter_functions()
+            .any(|f| f.name == name)
     }
 }
 
@@ -524,11 +566,13 @@ impl ActorScript {
         let shared = env.state.shared();
         let params = env.params.clone();
         let pose_sink = pose.clone();
-        let script = CompiledScript::compile(text, |engine| {
+        let script = CompiledScript::compile(text, |engine, source| {
             register_state_api(engine, &store, &shared, &params);
             register_input_api(engine, &input_sink);
             register_ui_api(engine, &ui_sink);
             register_party_api(engine, &party_sink);
+            crate::battle::register_battle_api(engine, &env.battle, source);
+            crate::battle::register_battle_readers(engine, &env.battle);
             let sink = pose_sink;
             engine.register_fn("pose", move |name: &str| {
                 *sink.lock().unwrap_or_else(PoisonError::into_inner) = Some(name.to_owned());
@@ -586,6 +630,17 @@ impl ActorScript {
     /// open; read back through `waiting()` during the next update.
     pub fn set_waiting(&self, waiting: bool) {
         *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
+    }
+
+    /// Calls a named entry point with one `Dynamic` argument; how the
+    /// battle engine asks a brain file what its participant does.
+    pub fn call_dynamic(
+        &self,
+        scope: &mut Scope,
+        name: &str,
+        arg: Dynamic,
+    ) -> Result<Dynamic, ScriptError> {
+        self.script.call(scope, name, (arg,))
     }
 
     /// Runs one `on_update`. The position is `None` when the script (or
@@ -675,11 +730,13 @@ impl SceneScript {
         let shared = env.state.shared();
         let params = env.params.clone();
         Ok(Self {
-            script: CompiledScript::compile(text, |engine| {
+            script: CompiledScript::compile(text, |engine, source| {
                 register_state_api(engine, &store, &shared, &params);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
+                crate::battle::register_battle_api(engine, &env.battle, source);
+                crate::battle::register_battle_readers(engine, &env.battle);
             })?,
             party,
         })
@@ -775,11 +832,13 @@ impl WorldScript {
         let shared = env.state.shared();
         let params = env.params.clone();
         Ok(Self {
-            script: CompiledScript::compile(text, |engine| {
+            script: CompiledScript::compile(text, |engine, source| {
                 register_state_api(engine, &store, &shared, &params);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
+                crate::battle::register_battle_api(engine, &env.battle, source);
+                crate::battle::register_battle_readers(engine, &env.battle);
             })?,
             party,
         })
@@ -804,7 +863,7 @@ impl WorldScript {
     }
 }
 
-fn runtime_error(message: String) -> Box<rhai::EvalAltResult> {
+pub(crate) fn runtime_error(message: String) -> Box<rhai::EvalAltResult> {
     Box::new(rhai::EvalAltResult::ErrorRuntime(
         message.into(),
         Position::NONE,
@@ -1211,7 +1270,12 @@ mod tests {
                 stick = axis("left_stick_x");
             }
             "#,
-            ScriptEnv::new(manager.handle(), UiApi::new(), WorldState::default()),
+            ScriptEnv::new(
+                manager.handle(),
+                UiApi::new(),
+                WorldState::default(),
+                crate::battle::BattleHandle::new(),
+            ),
         )
         .unwrap();
         let mut scope = Scope::new();
@@ -1226,7 +1290,12 @@ mod tests {
         // Unknown action names are strict errors, not silent falses.
         let script = ActorScript::compile_with_handle(
             r#"fn on_update(x, z, player_x, player_z, dt) { bogused = pressed("south"); }"#,
-            ScriptEnv::new(manager.handle(), UiApi::new(), WorldState::default()),
+            ScriptEnv::new(
+                manager.handle(),
+                UiApi::new(),
+                WorldState::default(),
+                crate::battle::BattleHandle::new(),
+            ),
         )
         .unwrap();
         assert!(
@@ -1252,7 +1321,12 @@ mod tests {
                 if ui_confirmed("menu") >= 0 { chose = 1; }
             }
             "#,
-            ScriptEnv::new(crate::input::detached(), api.clone(), WorldState::default()),
+            ScriptEnv::new(
+                crate::input::detached(),
+                api.clone(),
+                WorldState::default(),
+                crate::battle::BattleHandle::new(),
+            ),
         )
         .unwrap();
         let mut scope = Scope::new();
@@ -1368,6 +1442,7 @@ mod tests {
             crate::input::detached(),
             UiApi::new(),
             WorldState::default(),
+            crate::battle::BattleHandle::new(),
         );
         let script = ActorScript::compile_with_handle(
             r#"
@@ -1426,6 +1501,7 @@ mod tests {
             crate::input::detached(),
             UiApi::new(),
             WorldState::default(),
+            crate::battle::BattleHandle::new(),
         );
         let writer = ActorScript::compile_with_handle(
             r#"fn on_update(x, z, player_x, player_z, dt) { remember_global("met.goblin", true); }"#,
@@ -1472,5 +1548,48 @@ mod tests {
         );
         assert_eq!(scope.get_value::<i64>("rich"), Some(60));
         assert_eq!(scope.get_value::<bool>("missing"), Some(true));
+    }
+
+    #[test]
+    fn the_shipped_battle_camera_script_flies_when_toggled() {
+        use crate::input::PadButton;
+
+        let input = crate::input::detached();
+        let battle = crate::battle::BattleHandle::new();
+        let text = std::fs::read_to_string(
+            crate::assets::assets_root().join("scripts/world/battle_camera.rhai"),
+        )
+        .expect("the shipped camera script is on disk");
+        let script = WorldScript::compile_with_handle(
+            &text,
+            ScriptEnv::new(
+                input.clone(),
+                UiApi::new(),
+                WorldState::default(),
+                battle.clone(),
+            ),
+        )
+        .expect("the shipped camera script compiles");
+        let mut scope = Scope::new();
+
+        // Buttons up: the mode is off and nothing flies.
+        script.update(&mut scope, 0.016).unwrap();
+        assert_eq!(battle.take_requests().len(), 0);
+
+        // Select taps the mode on; a held d-pad looks. The shipped
+        // script also exercises the world tier's registration of
+        // battle_camera_move, so this catches a missing tier.
+        input.lock().unwrap().inject(
+            &[PadButton::Select, PadButton::DPadLeft],
+            &[PadButton::Select],
+            &[],
+        );
+        script.update(&mut scope, 0.016).unwrap();
+        let requests = battle.take_requests();
+        assert_eq!(requests.len(), 1);
+        assert!(matches!(
+            requests[0],
+            crate::battle::BattleRequest::CameraMove { yaw, .. } if yaw > 0.0
+        ));
     }
 }

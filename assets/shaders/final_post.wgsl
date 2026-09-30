@@ -1,8 +1,12 @@
-//! CRT-style display simulation over the presented frame.
+//! The final post-processing pass: PSX ordered dithering + color
+//! quantization, then CRT-style display simulation, over the presented
+//! frame.
 //!
 //! Runs on the present camera, after the finished game image has been
-//! blitted to the window, so the effect covers the upscaled picture
-//! exactly like a tube showing a 240p console signal.
+//! blitted to the window, so the effects cover the upscaled picture
+//! exactly like a tube showing a 240p console signal. The dither runs
+//! first (quantizing the signal the way a 240p console would emit it),
+//! then the CRT effects layer the display simulation on top.
 //!
 //! Every effect is periodic in virtual-pixel space — one scanline per
 //! game row (240 rows, like the signal itself) and one RGB stripe
@@ -16,14 +20,16 @@
 @group(0) @binding(0) var screen_texture: texture_2d<f32>;
 @group(0) @binding(1) var texture_sampler: sampler;
 
-struct CrtMaterial {
+struct FinalPostMaterial {
     bleed: f32,
     scanline: f32,
     mask: f32,
     vignette: f32,
+    dither_strength: f32,
+    color_steps: f32,
 }
 
-@group(0) @binding(2) var<uniform> settings: CrtMaterial;
+@group(0) @binding(2) var<uniform> settings: FinalPostMaterial;
 
 const GAME_W: f32 = 320.0;
 const GAME_H: f32 = 240.0;
@@ -43,9 +49,28 @@ fn signal_bleed(center: vec3<f32>, uv: vec2<f32>) -> vec3<f32> {
     return (center * 6.0 + near * 4.0 + far) / 16.0;
 }
 
+/// 4x4 Bayer threshold matrix, tiled across the screen in virtual
+/// texels.
+const BAYER_4X4: array<f32, 16> = array<f32, 16>(
+    0.0,  8.0,  2.0, 10.0,
+   12.0,  4.0, 14.0,  6.0,
+    3.0, 11.0,  1.0,  9.0,
+   15.0,  7.0, 13.0,  5.0
+);
+
 @fragment
 fn fragment(in: FullscreenVertexOutput) -> @location(0) vec4<f32> {
-    let color = textureSampleLevel(screen_texture, texture_sampler, in.uv, 0.0).rgb;
+    var color = textureSampleLevel(screen_texture, texture_sampler, in.uv, 0.0).rgb;
+
+    // Ordered dither + color quantize first: the frame is pushed
+    // toward a 240p console's 4-bit-ish palette before the tube
+    // simulation layers on top. A strength of 0 leaves raw colors.
+    if (settings.dither_strength > 0.0) {
+        let texel = floor(in.uv * vec2<f32>(320.0, 240.0));
+        let bayer = BAYER_4X4[u32(texel.x + texel.y * 4.0) % 16u] / 16.0 - 0.5;
+        color += bayer * settings.dither_strength / settings.color_steps;
+        color = floor(color * settings.color_steps) / settings.color_steps;
+    }
 
     // Bleed first: the cable smears the signal before the tube shows
     // it. A bleed of 0 keeps the frame perfectly sharp.

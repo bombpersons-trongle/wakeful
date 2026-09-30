@@ -132,6 +132,8 @@ pub fn apply_scene(
     input: Res<InputManager>,
     ui: Res<UiApi>,
     state: Res<WorldState>,
+    battle: Res<crate::battle::BattleHandle>,
+    graphics: Res<SceneGraphics>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut cameras: GameCameraQuery,
@@ -174,7 +176,7 @@ pub fn apply_scene(
     ));
 
     if let Some(path) = &scene.background {
-        spawn_background(&mut commands, &assets, path);
+        spawn_background(&mut commands, &assets, path, &graphics);
     }
 
     // Every scene application starts a fresh player at the scene's chosen
@@ -189,13 +191,16 @@ pub fn apply_scene(
             transform.translation = Vec3::new(at.x, player::PLAYER_Y, at.y);
             transform.rotation = facing_rotation(scene.camera_forward());
         }
-        Err(_) => player::spawn_player(
-            &mut commands,
-            &mut meshes,
-            &mut materials,
-            at,
-            scene.camera_forward(),
-        ),
+        Err(_) => {
+            let player = player::spawn_player(
+                &mut commands,
+                &mut meshes,
+                &mut materials,
+                at,
+                scene.camera_forward(),
+            );
+            commands.entity(graphics.0).add_child(player);
+        }
     }
     commands.remove_resource::<PlayerSpawn>();
 
@@ -209,7 +214,7 @@ pub fn apply_scene(
             .collect(),
     ));
 
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone());
+    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
     let scene_path = current.path.as_str();
     actor::spawn_actors(
         &mut commands,
@@ -218,6 +223,7 @@ pub fn apply_scene(
         scene.camera_forward(),
         scene_path,
         &env,
+        &graphics,
     );
 
     // The scene's script, if the file declares one; run_scene_scripts
@@ -281,20 +287,28 @@ pub(crate) fn run_scene_scripts(
 
 /// Spawns the scene's background image on its dedicated layer. Also used
 /// by the editor when the background path changes at runtime.
-pub(crate) fn spawn_background(commands: &mut Commands, assets: &AssetServer, path: &str) {
-    commands.spawn((
-        BackgroundSprite,
-        Sprite {
-            image: assets.load(path.to_owned()),
-            // Backgrounds are authored at the virtual resolution.
-            custom_size: Some(Vec2::new(
-                screen::GAME_WIDTH as f32,
-                screen::GAME_HEIGHT as f32,
-            )),
-            ..default()
-        },
-        RenderLayers::layer(BG_LAYER),
-    ));
+pub(crate) fn spawn_background(
+    commands: &mut Commands,
+    assets: &AssetServer,
+    path: &str,
+    graphics: &SceneGraphics,
+) {
+    let sprite = commands
+        .spawn((
+            BackgroundSprite,
+            Sprite {
+                image: assets.load(path.to_owned()),
+                // Backgrounds are authored at the virtual resolution.
+                custom_size: Some(Vec2::new(
+                    screen::GAME_WIDTH as f32,
+                    screen::GAME_HEIGHT as f32,
+                )),
+                ..default()
+            },
+            RenderLayers::layer(BG_LAYER),
+        ))
+        .id();
+    commands.entity(graphics.0).add_child(sprite);
 }
 
 /// Strips a `#SceneN` sub-asset suffix from a character-model path: the
@@ -328,6 +342,61 @@ pub fn sync_ground(
         Visibility::Visible
     };
 }
+
+/// Root of every scene-context graphic: the background photo, the
+/// ground, the scene actors, and the field player. A battle folds the
+/// whole tree away with one visibility toggle instead of walking
+/// per-entity roots — per-entity suspend/resume churn is what let
+/// hidden subtrees leak back into view.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct SceneGraphics(pub(crate) Entity);
+
+/// Spawns the two context roots once at boot: scene graphics and (over
+/// in battle.rs) battle graphics. Nothing else ever re-parents under
+/// them.
+pub(crate) fn setup_graphics(mut commands: Commands) {
+    let scene = commands
+        .spawn((Name::new("scene graphics"), Visibility::default(), Transform::IDENTITY))
+        .id();
+    commands.insert_resource(SceneGraphics(scene));
+    crate::battle::setup_graphics(&mut commands);
+}
+
+/// `OnEnter(Battle)`: the scene steps aside — one toggle on the scene
+/// graphics root folds the background, ground, actors, and player away
+/// while the arena has the screen, and the background camera stops
+/// compositing. Every managed model root defers to its ancestors
+/// (`Inherited` when revealed, `Hidden` before the first driven step),
+/// so a parent toggle is the whole suspension.
+pub(crate) fn suspend_scene(
+    mut commands: Commands,
+    graphics: Res<SceneGraphics>,
+    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
+) {
+    commands.entity(graphics.0).insert(Visibility::Hidden);
+    for mut camera in &mut bg_cameras {
+        camera.is_active = false;
+    }
+}
+
+/// `OnEnter(Scene)`: fires at the transition's covered point — the
+/// scene comes back exactly as it was.
+pub(crate) fn resume_scene(
+    mut commands: Commands,
+    // The init state transition fires OnEnter(Scene) before Startup has
+    // run, so the graphics root may not exist yet; the hook no-ops.
+    graphics: Option<Res<SceneGraphics>>,
+    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
+) {
+    let Some(graphics) = graphics else {
+        return;
+    };
+    commands.entity(graphics.0).insert(Visibility::Visible);
+    for mut camera in &mut bg_cameras {
+        camera.is_active = true;
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
@@ -499,6 +568,9 @@ mod tests {
         world.insert_resource(crate::systems::ui::UiApi::new());
         world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(crate::world_state::WorldState::default());
+        world.insert_resource(crate::battle::BattleHandle::new());
+        let graphics = SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);

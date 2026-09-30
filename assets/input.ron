@@ -21,7 +21,7 @@
         "r2": ["ShiftLeft", "ShiftRight", "r2"],
         "l3": ["L3"],
         "r3": ["R3"],
-        "start": ["Start"],
-        "select": ["Select"],
+        "start": ["KeyQ", "Start"],
+        "select": ["KeyR", "Select"],
     },
 )

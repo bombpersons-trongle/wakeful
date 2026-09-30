@@ -49,7 +49,7 @@ struct ScriptRuntime {
 
 /// glTF model queued for the actor; removed once attached as a child.
 #[derive(Component)]
-pub(crate) struct ActorModel(Handle<Gltf>);
+pub(crate) struct ActorModel(pub(crate) Handle<Gltf>);
 
 /// Actors with runnable scripts and their transform; broken scripts are
 /// filtered out at the query level.
@@ -76,6 +76,7 @@ pub(crate) fn spawn_actors(
     toward: Vec2,
     scene_path: &str,
     env: &crate::scripts::ScriptEnv,
+    graphics: &crate::systems::scene::SceneGraphics,
 ) {
     for actor in &scene.actors {
         // Storage identity: game-wide id when set (shared across
@@ -100,26 +101,30 @@ pub(crate) fn spawn_actors(
                 script,
                 scope: Scope::new(),
             });
-        commands.spawn((
-            Actor {
-                script,
-                bubble: None,
-                said: None,
-            },
-            Locomotion::default(),
-            // No script to tick: the driver's reveal marker would
-            // never land, so show script-less models from the start.
-            ScriptTicked,
-            ActorModel(assets.load(gltf_asset_path(&actor.model))),
-            // A pinned facing turns the model to a world yaw; otherwise
-            // the actor looks the way the scene camera looks.
-            Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
-                match actor.facing {
-                    Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
-                    None => facing_rotation(toward),
+        let entity = commands
+            .spawn((
+                Actor {
+                    script,
+                    bubble: None,
+                    said: None,
                 },
-            ),
-        ));
+                Visibility::default(),
+                Locomotion::default(),
+                // No script to tick: the driver's reveal marker would
+                // never land, so show script-less models from the start.
+                ScriptTicked,
+                ActorModel(assets.load(gltf_asset_path(&actor.model))),
+                // A pinned facing turns the model to a world yaw; otherwise
+                // the actor looks the way the scene camera looks.
+                Transform::from_xyz(actor.position[0], 0.0, actor.position[1]).with_rotation(
+                    match actor.facing {
+                        Some(degrees) => Quat::from_rotation_y(degrees.to_radians()),
+                        None => facing_rotation(toward),
+                    },
+                ),
+            ))
+            .id();
+        commands.entity(graphics.0).add_child(entity);
     }
 }
 
@@ -143,7 +148,11 @@ pub(crate) fn attach_actor_models(
         commands
             .entity(entity)
             .insert(PendingAnimations(model.0.clone()))
-            .with_child((WorldAssetRoot(scene), Transform::default()));
+            .with_child((
+                WorldAssetRoot(scene),
+                Visibility::default(),
+                Transform::default(),
+            ));
         commands.entity(entity).remove::<ActorModel>();
     }
 }
@@ -182,11 +191,13 @@ pub(crate) fn run_actor_scripts(
         // The script polls waiting() to hold its place while the player
         // hasn't confirmed its wait-mode bubble yet. Computed before the
         // script runtime borrows the actor mutably.
-        let waiting = actor.bubble.is_some_and(|bubble| {
-            bubbles
-                .get(bubble)
-                .is_ok_and(|bubble| bubble.is_waiting() && bubble.is_open())
-        });
+        // Script-facing waiting() = "my wait-mode bubble exists" — the
+        // opening animation counts, or an eager press during the pop
+        // would slip past the script's challenge gate. The is_open gate
+        // lives only in the engine's dismissal.
+        let waiting = actor
+            .bubble
+            .is_some_and(|bubble| bubbles.get(bubble).is_ok_and(|b| b.is_waiting()));
         let Some(runtime) = actor.script.as_mut() else {
             continue;
         };
@@ -436,6 +447,8 @@ mod tests {
             }],
         };
         let server = world.resource::<AssetServer>().clone();
+        let graphics = crate::systems::scene::SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let mut commands = world.commands();
         let env = crate::scripts::ScriptEnv::detached();
         spawn_actors(
@@ -445,6 +458,7 @@ mod tests {
             Vec2::NEG_Y,
             "scenes/test.scene",
             &env,
+            &graphics,
         );
         world.flush();
 
@@ -487,6 +501,8 @@ mod tests {
             }],
         };
         let server = world.resource::<AssetServer>().clone();
+        let graphics = crate::systems::scene::SceneGraphics(world.spawn_empty().id());
+        world.insert_resource(graphics);
         let mut commands = world.commands();
         let env = crate::scripts::ScriptEnv::detached();
         spawn_actors(
@@ -496,6 +512,7 @@ mod tests {
             Vec2::NEG_Y,
             "scenes/test.scene",
             &env,
+            &graphics,
         );
         world.flush();
 

@@ -35,15 +35,17 @@ pub(crate) fn spawn_player(
     materials: &mut Assets<StandardMaterial>,
     at: Vec2,
     toward: Vec2,
-) {
+) -> Entity {
     let player = commands
         .spawn((
             Player,
             Locomotion::default(),
+            Visibility::default(),
             Transform::from_xyz(at.x, PLAYER_Y, at.y).with_rotation(facing_rotation(toward)),
         ))
         .id();
     spawn_placeholder_body(commands, player, meshes, materials);
+    player
 }
 
 /// Spawns the placeholder cone under `player`, pitched along its +Z
@@ -71,6 +73,7 @@ pub(crate) fn spawn_placeholder_body(
 #[derive(Component)]
 pub(crate) struct PlaceholderBody;
 
+#[allow(clippy::too_many_arguments)]
 pub fn move_player(
     time: Res<Time>,
     input: Res<crate::input::InputManager>,
@@ -82,7 +85,7 @@ pub fn move_player(
 ) {
     // Editing pauses play: the mouse paints cells and the camera pose is
     // whatever the panel says. Script UI can pause the world too — FF7
-    // menus freeze the field.
+    // menus freeze the field. Battles freeze it by state instead.
     if editor.is_some_and(|editor| editor.open) || pause.0 {
         return;
     }

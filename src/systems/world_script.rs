@@ -34,8 +34,9 @@ pub(crate) fn startup(
     input: Res<InputManager>,
     ui: Res<UiApi>,
     state: Res<WorldState>,
+    battle: Res<crate::battle::BattleHandle>,
 ) {
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone());
+    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
     spawn_world_scripts(&mut commands, &assets_root().join(WORLD_SCRIPTS_DIR), &env);
 }
 
@@ -146,6 +147,7 @@ mod tests {
             input,
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
+            crate::battle::BattleHandle::new(),
         );
         spawn_world_scripts(&mut world.commands(), &dir.0, &env);
         world.flush();
@@ -175,6 +177,7 @@ mod tests {
             input,
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
+            crate::battle::BattleHandle::new(),
         );
         spawn_world_scripts(
             &mut world.commands(),
@@ -200,7 +203,12 @@ mod tests {
         let api = UiApi::new();
         world.insert_resource(api.clone());
         let handle = world.resource::<InputManager>().handle();
-        let env = crate::scripts::ScriptEnv::new(handle, api.clone(), WorldState::default());
+        let env = crate::scripts::ScriptEnv::new(
+            handle,
+            api.clone(),
+            WorldState::default(),
+            crate::battle::BattleHandle::new(),
+        );
         let runtime = WorldScriptRuntime::compile_with_handle(
             include_str!("../../assets/scripts/world/triangle_menu.rhai"),
             env,

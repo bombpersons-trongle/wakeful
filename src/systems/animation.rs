@@ -49,14 +49,18 @@ pub(crate) struct CharacterAnimations {
 /// plus the one-shot emote and held pose currently selected. `root` is
 /// the spawned model's top entity, kept hidden until the character's
 /// first driven step so a re-entered scene never flashes its bind pose
-/// (`appeared` latches the unhide).
-#[derive(Component, Default)]
+/// (`appeared` latches the unhide). `model` is the glTF the wiring came
+/// from, so a broken wiring can be rebuilt (a scene instance can be
+/// re-spawned after the resolver ran, taking its AnimationPlayer with
+/// it).
+#[derive(Component)]
 pub(crate) struct CharacterAnimator {
     player: Option<Entity>,
     emote: Option<AnimationNodeIndex>,
     pose: Option<AnimationNodeIndex>,
     root: Option<Entity>,
     appeared: bool,
+    model: Handle<Gltf>,
 }
 
 #[cfg(debug_assertions)]
@@ -68,6 +72,16 @@ impl CharacterAnimator {
             self.emote.map(|i| i.index()),
             self.pose.map(|i| i.index())
         )
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_root(&self) -> Option<Entity> {
+        self.root
+    }
+
+    #[cfg(debug_assertions)]
+    pub(crate) fn debug_appeared(&self) -> bool {
+        self.appeared
     }
 
     pub(crate) fn debug_player(&self) -> Option<Entity> {
@@ -243,13 +257,16 @@ pub(crate) fn resolve_pending_animations(
         // first driven step (or the actor's first script tick), so a
         // returning chest is seen open rather than flashing closed.
         commands.entity(entity).insert((
-            CharacterAnimations { clips },
+            CharacterAnimations {
+                clips: clips.clone(),
+            },
             CharacterAnimator {
                 player: Some(player),
                 emote: None,
                 pose: None,
                 root: model_root,
                 appeared: false,
+                model: pending.0.clone(),
             },
         ));
         if let Some(root) = model_root {
@@ -295,8 +312,9 @@ pub(crate) fn run_character_animations(
         Option<&ScriptTicked>,
     )>,
     mut transitions: Query<(&mut AnimationPlayer, &mut AnimationTransitions)>,
+    model_visibilities: Query<&'static Visibility>,
 ) {
-    for (_entity, locomotion, request, anims, mut animator, ticked) in &mut characters {
+    for (entity, locomotion, request, anims, mut animator, ticked) in &mut characters {
         let (emote_name, pose_name) = match request {
             Some(mut request) => {
                 let emote = request.emote.take();
@@ -317,9 +335,28 @@ pub(crate) fn run_character_animations(
         let emote_request = resolve(emote_name);
         let pose_request = resolve(pose_name);
         let Some(player_entity) = animator.player else {
+            if !animator.appeared {
+                warn!("driver {:?}: no player entity", entity.index());
+            }
             continue;
         };
         let Ok((mut player, mut transitions)) = transitions.get_mut(player_entity) else {
+            if !animator.appeared {
+                // The model's scene instance can be re-spawned after the
+                // resolver wired it (the instance's AnimationPlayer goes
+                // with it): re-queue the whole wiring against the live
+                // hierarchy instead of staying invisible forever.
+                warn!(
+                    "driver {:?}: animation player {:?} is gone; re-queuing the wiring",
+                    entity.index(),
+                    player_entity.index()
+                );
+                let model = animator.model.clone();
+                commands
+                    .entity(entity)
+                    .remove::<(CharacterAnimations, CharacterAnimator)>()
+                    .insert(PendingAnimations(model));
+            }
             continue;
         };
         let status = animator
@@ -367,17 +404,44 @@ pub(crate) fn run_character_animations(
             }
             Step::None => {}
         }
+        if !animator.appeared {
+            debug!(
+                "loop head {:?}: player={:?}",
+                entity.index(),
+                animator.player.map(|p| p.index())
+            );
+        }
+        if !animator.appeared {
+            warn!(
+                "reveal {:?}: step={:?} ticked={:?} moving={} running={}",
+                entity.index(),
+                step,
+                ticked.is_some(),
+                locomotion.moving,
+                locomotion.running
+            );
+        }
         // Reveal the model once it has something true to show: the
         // first driven step applied a pose or gait, or the actor's
         // script has ticked (a closed chest has nothing to animate but
         // must be seen). Until then the model stays hidden so a
-        // re-entered scene never flashes its bind pose.
-        if !animator.appeared
-            && let Some(root) = animator.root
-            && (ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote))
-        {
-            animator.appeared = true;
-            commands.entity(root).insert(Visibility::Visible);
+        // re-entered scene never flashes its bind pose. The re-assert
+        // heals the race where the resolver's own hide lands after a
+        // reveal from an earlier tick. Managed roots are always
+        // Inherited when shown — never Visible, which would override a
+        // hidden ancestor and punch through context hides.
+        if let Some(root) = animator.root {
+            let revealed = if animator.appeared {
+                model_visibilities.get(root) == Ok(&Visibility::Inherited)
+            } else if ticked.is_some() || !matches!(step, Step::None | Step::HoldEmote) {
+                animator.appeared = true;
+                true
+            } else {
+                false
+            };
+            if revealed && model_visibilities.get(root) != Ok(&Visibility::Inherited) {
+                commands.entity(root).insert(Visibility::Inherited);
+            }
         }
     }
 }
@@ -786,6 +850,32 @@ mod tests {
     }
 
     #[test]
+    fn a_battle_participant_reveals_through_its_idle_gait() {
+        // Battle participants carry no actor scripts (no ScriptTicked
+        // ever lands): the idle gait alone must reveal them.
+        let mut world = World::new();
+        world.init_resource::<Assets<Gltf>>();
+        world.init_resource::<Assets<AnimationGraph>>();
+        let (_, gltf) = gltf_with(&["idle"]);
+        let handle = world.resource_mut::<Assets<Gltf>>().add(gltf);
+        let root = character_with_model(&mut world, handle);
+        world.entity_mut(root).insert(Locomotion::default());
+
+        world.run_system_once(resolve_pending_animations).unwrap();
+        world.flush();
+        world.run_system_once(run_character_animations).unwrap();
+        world.flush();
+
+        let animator = world.get::<CharacterAnimator>(root).unwrap();
+        let model_root = animator.root.unwrap();
+        assert_eq!(
+            world.get::<Visibility>(model_root).copied(),
+            Some(Visibility::Inherited),
+            "the idle gait reveals a battle participant (deferring to ancestors)",
+        );
+    }
+
+    #[test]
     fn the_driver_plays_the_gait_and_starts_requested_emotes() {
         let mut world = World::new();
         world.init_resource::<Assets<Gltf>>();
@@ -892,7 +982,8 @@ mod tests {
         assert!(animator.appeared, "the pose revealed the model");
         assert_eq!(
             world.get::<Visibility>(model_root).copied(),
-            Some(Visibility::Visible),
+            Some(Visibility::Inherited),
+            "the reveal defers to ancestors instead of overriding them",
         );
         let animation = world
             .get::<AnimationPlayer>(player)
@@ -919,3 +1010,4 @@ mod tests {
         assert!(world.get::<CharacterAnimator>(root).is_none());
     }
 }
+// (appended below in the tests module)

@@ -661,16 +661,19 @@ pub struct InjectedInputs {
 }
 
 impl InjectedInputs {
-    pub(crate) fn merge_into(&self, state: &mut InputState) {
+    /// Edges are drained by the first fixed tick that sees them: a
+    /// frame running several fixed ticks must not re-fire one tap per
+    /// tick (a select toggle would flip on and straight back off).
+    pub(crate) fn merge_into(&mut self, state: &mut InputState) {
         for button in &self.held {
             state.press_button(*button);
         }
-        for button in &self.just_pressed {
-            state.press_button(*button);
-            state.mark_just_pressed(*button);
+        for button in std::mem::take(&mut self.just_pressed) {
+            state.press_button(button);
+            state.mark_just_pressed(button);
         }
-        for button in &self.just_released {
-            state.mark_just_released(*button);
+        for button in std::mem::take(&mut self.just_released) {
+            state.mark_just_released(button);
         }
     }
 }
@@ -681,10 +684,10 @@ pub fn aggregate_inputs(
     mouse: Res<ButtonInput<MouseButton>>,
     pad_buttons: Res<ButtonInput<GamepadButton>>,
     pad_axes: Res<Axis<GamepadAxis>>,
-    injected: Option<Res<InjectedInputs>>,
+    injected: Option<ResMut<InjectedInputs>>,
 ) {
     manager.aggregate(&keys, &mouse, &pad_buttons, &pad_axes);
-    if let Some(injected) = injected {
+    if let Some(mut injected) = injected {
         let state = manager.handle();
         injected.merge_into(&mut state.lock().unwrap_or_else(PoisonError::into_inner));
     }
@@ -809,6 +812,33 @@ mod tests {
         assert!(manager.pressed(PadButton::R2), "RightTrigger2 is R2");
         let handle = manager.handle();
         assert_eq!(lock(&handle).axis_by_name("left_stick_y"), Some(-0.95));
+    }
+
+    #[test]
+    fn injected_edges_fire_on_exactly_one_fixed_tick() {
+        let mut manager = InputManager::standard();
+        let keys = ButtonInput::default();
+        let mouse = ButtonInput::default();
+        let pad = ButtonInput::default();
+        let axes = Axis::default();
+        let handle = manager.handle();
+        let mut injected = InjectedInputs::default();
+        injected.just_pressed.insert(PadButton::Select);
+        injected.held.insert(PadButton::DPadLeft);
+
+        // The frame's first fixed tick sees the tap and the hold...
+        manager.aggregate(&keys, &mouse, &pad, &axes);
+        injected.merge_into(&mut lock(&handle));
+        assert!(lock(&handle).just_pressed(PadButton::Select));
+        assert!(lock(&handle).pressed(PadButton::DPadLeft));
+
+        // ...the frame's second fixed tick sees only the hold: a tap
+        // file must not re-fire per catch-up tick.
+        manager.aggregate(&keys, &mouse, &pad, &axes);
+        injected.merge_into(&mut lock(&handle));
+        assert!(!lock(&handle).just_pressed(PadButton::Select));
+        assert!(lock(&handle).pressed(PadButton::DPadLeft));
+        assert!(injected.just_pressed.is_empty(), "the edge was consumed");
     }
 
     #[test]

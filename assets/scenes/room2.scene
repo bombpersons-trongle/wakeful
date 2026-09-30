@@ -1,4 +1,5 @@
 (
+    script: Some("scripts/room2_note.rhai"),
     background: Some("backgrounds/carlisle_2.png"),
     camera: (
         position: (0.0, 6.5, -9.6),

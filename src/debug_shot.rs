@@ -12,6 +12,7 @@
 use std::path::{Path, PathBuf};
 
 use bevy::asset::RenderAssetUsages;
+use bevy::ecs::entity::Entities;
 use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::gpu_readback::{Readback, ReadbackComplete};
@@ -58,17 +59,60 @@ fn scan_shot_requests(dir: &Path) -> Vec<String> {
 /// the GPU, delete the request. The PNG lands when the readback
 /// completes, a frame or two later.
 #[allow(clippy::too_many_arguments)]
-pub fn check_requests(
+/// The render-side queries of the state dump, bundled to stay under
+/// the system parameter limit.
+#[derive(bevy::ecs::system::SystemParam)]
+pub(crate) struct RenderDumpParams<'w, 's> {
+    cameras:
+        Query<'w, 's, (&'static Transform, &'static Projection, &'static Camera), With<Camera3d>>,
+    meshes: Query<
+        'w,
+        's,
+        (
+            &'static GlobalTransform,
+            &'static Mesh3d,
+            &'static Visibility,
+            &'static InheritedVisibility,
+            Option<&'static ChildOf>,
+        ),
+    >,
+    visibilities: Query<'w, 's, &'static Visibility>,
+    actormodels: Query<'w, 's, &'static crate::systems::actor::ActorModel>,
+    anim_players: Query<'w, 's, (), With<bevy::animation::prelude::AnimationPlayer>>,
+    graph_handles: Query<'w, 's, &'static bevy::animation::prelude::AnimationGraphHandle>,
+    anim_transitions: Query<'w, 's, &'static bevy::animation::prelude::AnimationTransitions>,
+    actors: Query<
+        'w,
+        's,
+        (
+            &'static GlobalTransform,
+            &'static Visibility,
+            &'static InheritedVisibility,
+        ),
+        With<crate::systems::actor::Actor>,
+    >,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn check_requests<'w, 's>(
     mut commands: Commands,
     dir: Option<Res<ShotDir>>,
     game_image: Option<Res<GameImage>>,
     state: Option<Res<crate::world_state::WorldState>>,
+    battle_handle: Option<Res<crate::battle::BattleHandle>>,
+    battle: Option<Res<crate::battle::Battle>>,
+    render: RenderDumpParams<'w, 's>,
     mut characters: Query<(
         Entity,
         &crate::systems::animation::CharacterAnimations,
         &mut crate::systems::animation::CharacterAnimator,
     )>,
     mut anim_players: Query<&mut bevy::animation::AnimationPlayer>,
+    visibilities: Query<&Visibility>,
+    transforms: Query<&Transform>,
+    entities: &Entities,
+    childrens: Query<&Children>,
+    pending_animations: Query<(Entity, &crate::systems::animation::PendingAnimations)>,
 ) {
     let (Some(dir), Some(game_image)) = (dir, game_image) else {
         return;
@@ -91,8 +135,96 @@ pub fn check_requests(
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             let mut lines = vec![format!("shared: {shared:?}")];
+            if let Some(handle) = &battle_handle {
+                lines.push(format!(
+                    "battle-handle: active={} requests={}",
+                    handle.active(),
+                    handle.pending_requests()
+                ));
+            }
+            let active = render
+                .cameras
+                .iter()
+                .find(|(_, _, camera)| camera.is_active)
+                .map(|(transform, projection, _)| (transform, projection));
+            if let Some((transform, Projection::Perspective(perspective))) = active {
+                let (yaw, pitch, _) = transform.rotation.to_euler(EulerRot::YXZ);
+                lines.push(format!(
+                    "camera: at {:?} yaw={:.2} pitch={:.2} fov={:.3}",
+                    transform.translation, yaw, pitch, perspective.fov
+                ));
+            }
+            let mut mesh_spots: Vec<String> = render
+                .meshes
+                .iter()
+                .filter(|(t, _, _, _, _)| t.translation().y < 15.0)
+                .map(|(t, _, v, iv, parent)| {
+                    format!(
+                        "{:.1} v={} iv={} parent={:?} pvis={:?}",
+                        t.translation(),
+                        *v == Visibility::Visible,
+                        iv.get(),
+                        parent.map(|c| c.parent().index()),
+                        parent
+                            .and_then(|c| render.visibilities.get(c.parent()).ok())
+                            .is_some_and(|p| *p == Visibility::Visible),
+                    )
+                })
+                .collect();
+            mesh_spots.sort();
+            lines.push(format!("low_meshes: {}", mesh_spots.join(", ")));
+            for (transform, visibility, inherited) in &render.actors {
+                lines.push(format!(
+                    "actor: at {:?} v={} iv={}",
+                    transform.translation(),
+                    *visibility == Visibility::Visible,
+                    inherited.get()
+                ));
+            }
+            if let Some(battle) = &battle {
+                lines.push(format!(
+                    "arena: {:?} children={:?}",
+                    battle.arena.index(),
+                    childrens.get(battle.arena).map(|ch| ch.len())
+                ));
+                lines.push(format!(
+                    "battle: participants={:?} actions={:?}",
+                    battle
+                        .participants
+                        .iter()
+                        .map(|c| (
+                            c.id.as_str(),
+                            c.entity.index(),
+                            render.actormodels.get(c.entity).is_ok(),
+                            childrens.get(c.entity).ok().map(|ch| ch.len()),
+                            childrens
+                                .get(c.entity)
+                                .ok()
+                                .and_then(|ch| ch.first())
+                                .and_then(|mc| {
+                                    childrens.get(*mc).ok().map(|scene_root| {
+                                        (
+                                            scene_root.len(),
+                                            scene_root.first().and_then(|n| {
+                                                childrens.get(*n).ok().map(|g| g.len())
+                                            }),
+                                        )
+                                    })
+                                }),
+                            entities.contains(c.entity),
+                        ))
+                        .collect::<Vec<_>>(),
+                    battle.actions.keys().collect::<Vec<_>>() // {:#?}
+                ));
+            }
             for (k, v) in scripts.iter() {
                 lines.push(format!("{k}: {:?}", v.lock().unwrap()));
+            }
+            for (entity, _) in pending_animations.iter() {
+                lines.push(format!(
+                    "pending {entity:?}: children={:?}",
+                    childrens.get(entity).map(|c| c.len())
+                ));
             }
             for (entity, animations, animator) in &mut characters {
                 lines.push(format!(
@@ -101,6 +233,42 @@ pub fn check_requests(
                     animations.debug_clips(),
                     animator.debug()
                 ));
+                if let Some(player_entity) = animator.debug_player() {
+                    lines.push(format!(
+                        "  player {:?}: alive={} anim_player={} graph={} transitions={}",
+                        player_entity.index(),
+                        entities.contains(player_entity),
+                        render.anim_players.contains(player_entity),
+                        render.graph_handles.contains(player_entity),
+                        render.anim_transitions.contains(player_entity),
+                    ));
+                }
+                if let Some(root) = animator.debug_root() {
+                    let scene_root = childrens
+                        .get(root)
+                        .ok()
+                        .and_then(|ch| ch.first())
+                        .and_then(|mc| childrens.get(*mc).ok());
+                    lines.push(format!(
+                        "  root {root:?}: appeared={} {:?} at {:?} children={:?} pending={} scene_root_children={:?} first_node_children={:?}",
+                        animator.debug_appeared(),
+                        visibilities.get(root),
+                        transforms.get(root).map(|t| t.translation),
+                        childrens.get(root).map(|c| c.len()),
+                        pending_animations.contains(root),
+                        scene_root.map(|r| r.len()),
+                        scene_root
+                            .and_then(|r| r.first())
+                            .and_then(|n| {
+                                childrens.get(*n).ok().map(|g| {
+                                    (
+                                        g.len(),
+                                        g.first().and_then(|h| childrens.get(*h).ok().map(|gg| gg.len())),
+                                    )
+                                })
+                            }),
+                    ));
+                }
                 if let Some(player_entity) = animator.debug_player()
                     && let Ok(player) = anim_players.get_mut(player_entity)
                 {

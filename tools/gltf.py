@@ -86,6 +86,9 @@ class Writer:
         self.meshes = []
         self.materials = []
         self.nodes = []
+        self.images = []
+        self.samplers = []
+        self.textures = []
 
     def add_view(self, data, target=None):
         while len(self.bin) % 4:
@@ -109,11 +112,52 @@ class Writer:
         self.accessors.append(acc)
         return len(self.accessors) - 1
 
+    def add_image(self, png_bytes):
+        """Embeds a PNG; returns the image index."""
+        while len(self.bin) % 4:
+            self.bin.append(0)
+        view = {"buffer": 0, "byteOffset": len(self.bin), "byteLength": len(png_bytes)}
+        self.bin += png_bytes
+        self.views.append(view)
+        self.images.append({"bufferView": len(self.views) - 1, "mimeType": "image/png"})
+        return len(self.images) - 1
+
+    def add_sampler(self):
+        """Bilinear filtering, repeat wrapping: the checker-arena default."""
+        self.samplers.append({
+            "magFilter": 9729,
+            "minFilter": 9729,
+            "wrapS": 10497,
+            "wrapT": 10497,
+        })
+        return len(self.samplers) - 1
+
+    def add_texture(self, image_index, sampler_index=0):
+        self.textures.append({"sampler": sampler_index, "source": image_index})
+        return len(self.textures) - 1
+
+    def add_textured_material(self, name, texture_index, unlit=False):
+        material = {
+            "name": name,
+            "pbrMetallicRoughness": {
+                "baseColorTexture": {"index": texture_index},
+                "metallicFactor": 0.0,
+                "roughnessFactor": 1.0,
+            },
+        }
+        if unlit:
+            # Skybox-style surfaces read their texture at full
+            # brightness; bevy_gltf maps this to StandardMaterial::unlit.
+            material["extensions"] = {"KHR_materials_unlit": {}}
+        self.materials.append(material)
+        return len(self.materials) - 1
+
     def add_mesh(self, name, primitives, material_indexes):
-        """primitives: [(positions, normals, indices)] sharing one mesh."""
+        """primitives: [(positions, normals, indices[, uvs])] sharing one mesh."""
         prims = []
         for primitive, material in zip(primitives, material_indexes):
-            positions, normals, indices = primitive
+            positions, normals, indices = primitive[:3]
+            uvs = primitive[3] if len(primitive) > 3 else None
             pos_view = self.add_view(struct.pack(f"<{len(positions) * 3}f", *[c for p in positions for c in p]), 34962)
             pos_min = [min(p[i] for p in positions) for i in range(3)]
             pos_max = [max(p[i] for p in positions) for i in range(3)]
@@ -122,8 +166,15 @@ class Writer:
             nrm_acc = self.add_accessor(nrm_view, "VEC3", len(normals))
             idx_view = self.add_view(struct.pack(f"<{len(indices)}H", *indices), 34963)
             idx_acc = self.add_accessor(idx_view, "SCALAR", len(indices), component=5123)
+            attributes = {"POSITION": pos_acc, "NORMAL": nrm_acc}
+            if uvs is not None:
+                uv_view = self.add_view(
+                    struct.pack(f"<{len(uvs) * 2}f", *[c for uv in uvs for c in uv]),
+                    34962,
+                )
+                attributes["TEXCOORD_0"] = self.add_accessor(uv_view, "VEC2", len(uvs))
             prims.append({
-                "attributes": {"POSITION": pos_acc, "NORMAL": nrm_acc},
+                "attributes": attributes,
                 "indices": idx_acc,
                 "material": material,
             })

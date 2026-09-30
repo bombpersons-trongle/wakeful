@@ -150,7 +150,12 @@ pub(crate) fn attach_player_model(
     commands
         .entity(player)
         .remove::<(CharacterAnimations, CharacterAnimator)>()
-        .with_child((FieldBody, WorldAssetRoot(scene), Transform::default()));
+        .with_child((
+            FieldBody,
+            WorldAssetRoot(scene),
+            Visibility::default(),
+            Transform::default(),
+        ));
     commands.remove_resource::<PlayerModel>();
 }
 

@@ -195,3 +195,46 @@ fn channel_rotations(
 fn quat_dot(a: [f32; 4], b: [f32; 4]) -> f32 {
     a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>().abs()
 }
+
+#[test]
+fn the_generated_arena_is_a_room_the_camera_fights_inside() {
+    let (document, buffers) =
+        assert_valid_model("arena.glb", include_bytes!("../assets/models/arena.glb"));
+
+    // One textured mesh, no animations: the arena is a static room.
+    assert_eq!(document.meshes().count(), 1, "one arena mesh");
+    assert_eq!(document.animations().count(), 0, "arenas do not animate");
+    let material = document.materials().next().expect("arena material");
+    let texture = material
+        .pbr_metallic_roughness()
+        .base_color_texture()
+        .expect("the arena is checker-textured");
+    assert_eq!(
+        texture.texture().source().name(),
+        Some("arena-checker"),
+        "the generated checker texture is bound"
+    );
+
+    // Every vertex normal must point at the room's center: the faces
+    // wind for a camera INSIDE the cube. A plain outward cube would
+    // render as nothing at all from the battle camera.
+    let mesh = document.meshes().next().unwrap();
+    let primitive = mesh.primitives().next().unwrap();
+    let center = [0.0, 4.0, 0.0]; // the room's middle (floor at y=0)
+    let reader = primitive.reader(|buffer| buffers.get(buffer.index()).map(|data| &data[..]));
+    let normals: Vec<[f32; 3]> = reader.read_normals().expect("normals").collect();
+    let positions: Vec<[f32; 3]> = reader.read_positions().expect("positions").collect();
+    assert_eq!(normals.len(), positions.len());
+    for (normal, position) in normals.iter().zip(&positions) {
+        let outward = [
+            position[0] - center[0],
+            position[1] - center[1],
+            position[2] - center[2],
+        ];
+        let dot: f32 = normal.iter().zip(outward).map(|(n, o)| n * o).sum();
+        assert!(
+            dot < 0.0,
+            "normals must face the room's center, got {normal:?} at {position:?}"
+        );
+    }
+}

@@ -1,21 +1,19 @@
-//! CRT-style display simulation, plus the user-tunable display
-//! settings both fullscreen effects read from `assets/ui.ron`.
+//! The final post-processing pass: PSX ordered dithering + color
+//! quantization, then CRT-style display simulation, plus the
+//! user-tunable display settings read from `assets/ui.ron`.
 //!
-//! [`CrtMaterial`] runs on the present camera — after the finished
-//! game image is blitted to the window — so the signal bleed,
-//! scanlines, RGB mask, and vignette cover the upscaled picture like
-//! a tube showing a 240p signal. The effects are periodic in
+//! [`FinalPostMaterial`] runs on the present camera — after the
+//! finished game image is blitted to the window — so the dithered,
+//! signal-bled, scanlined picture covers the upscaled frame like a
+//! tube showing a 240p signal. The effects are periodic in
 //! virtual-pixel space (see the shader docs), so window resizes can't
 //! distort the pattern.
 //!
 //! [`DisplaySettings`] is the parsed `ui.ron` section;
-//! [`sync_display_effects`] carries it into the live materials. Barrel
+//! [`sync_display_effects`] carries it into the live material. Barrel
 //! curvature is deliberately absent: it would need window-size math
 //! and would desync the editor's cursor picking.
 //!
-//! `snapshot_mac_os` includes this module only because `screen.rs`
-//! references it; the present camera doesn't exist there.
-
 use std::path::Path;
 
 use bevy::core_pipeline::fullscreen_material::FullscreenMaterial;
@@ -28,8 +26,6 @@ use bevy::render::extract_component::ExtractComponent;
 use bevy::render::render_resource::ShaderType;
 use bevy::shader::ShaderRef;
 use serde::Deserialize;
-
-use crate::dither::{self, DitherPostProcess};
 
 /// Parses RON with `IMPLICIT_SOME` so `Option` sections can be written
 /// plainly — `crt: (scanline: 0.5)` instead of `Some((...))`.
@@ -50,21 +46,23 @@ const TUNED_VIGNETTE: f32 = 0.30;
 /// depth, RGB mask depth, and vignette strength. All-zero strengths
 /// render the frame untouched — that is how "CRT off" is expressed.
 #[derive(Component, ExtractComponent, Clone, Copy, Debug, ShaderType, Default, PartialEq)]
-pub(crate) struct CrtMaterial {
+pub(crate) struct FinalPostMaterial {
     pub bleed: f32,
     pub scanline: f32,
     pub mask: f32,
     pub vignette: f32,
+    pub dither_strength: f32,
+    pub color_steps: f32,
 }
 
-impl FullscreenMaterial for CrtMaterial {
+impl FullscreenMaterial for FinalPostMaterial {
     fn fragment_shader() -> ShaderRef {
-        "shaders/crt.wgsl".into()
+        "shaders/final_post.wgsl".into()
     }
 
     // The present camera is a Camera2d, so the pass must run in the 2d
     // graph; the default Core3d schedule never touches 2d views (see
-    // dither.rs for the full story).
+    // the shader docs for the full story).
     fn schedule() -> impl ScheduleLabel + Clone {
         Core2d
     }
@@ -76,13 +74,15 @@ impl FullscreenMaterial for CrtMaterial {
     }
 }
 
-/// Gentle default CRT settings.
-pub(crate) fn tuned_crt() -> CrtMaterial {
-    CrtMaterial {
+/// Gentle default settings for the whole final pass.
+pub(crate) fn tuned_final_post() -> FinalPostMaterial {
+    FinalPostMaterial {
         bleed: TUNED_BLEED,
         scanline: TUNED_SCANLINE,
         mask: TUNED_MASK,
         vignette: TUNED_VIGNETTE,
+        dither_strength: 1.0,
+        color_steps: 15.0,
     }
 }
 
@@ -164,14 +164,15 @@ struct DisplayConfig {
     crt: Option<CrtSection>,
 }
 
-impl From<CrtSection> for CrtMaterial {
+impl From<CrtSection> for FinalPostMaterial {
     fn from(section: CrtSection) -> Self {
         if section.enabled {
-            CrtMaterial {
+            FinalPostMaterial {
                 bleed: section.bleed,
                 scanline: section.scanline,
                 mask: section.mask,
                 vignette: section.vignette,
+                ..tuned_final_post()
             }
         } else {
             Self::default()
@@ -221,32 +222,27 @@ impl DisplaySettings {
 /// this working in bare-world tests (see `BubbleAssets.applied`).
 pub(crate) fn sync_display_effects(
     settings: Res<DisplaySettings>,
-    mut dither: Query<&mut DitherPostProcess>,
-    mut crt: Query<&mut CrtMaterial>,
+    mut pass: Query<&mut FinalPostMaterial>,
 ) {
-    let mut wanted = dither::tuned();
+    let mut wanted = tuned_final_post();
     if !settings.dither_enabled {
         wanted.dither_strength = 0.0;
     }
-    for mut pass in &mut dither {
-        if *pass != wanted {
-            *pass = wanted;
-        }
-    }
 
-    let wanted_crt = if settings.crt_enabled {
-        CrtMaterial {
-            bleed: settings.bleed,
-            scanline: settings.scanline,
-            mask: settings.mask,
-            vignette: settings.vignette,
-        }
+    if !settings.crt_enabled {
+        wanted.bleed = 0.0;
+        wanted.scanline = 0.0;
+        wanted.mask = 0.0;
+        wanted.vignette = 0.0;
     } else {
-        CrtMaterial::default()
-    };
-    for mut pass in &mut crt {
-        if *pass != wanted_crt {
-            *pass = wanted_crt;
+        wanted.bleed = settings.bleed;
+        wanted.scanline = settings.scanline;
+        wanted.mask = settings.mask;
+        wanted.vignette = settings.vignette;
+    }
+    for mut material in &mut pass {
+        if *material != wanted {
+            *material = wanted;
         }
     }
 }
@@ -269,12 +265,13 @@ mod tests {
         assert!(s.dither_enabled);
         assert!(s.crt_enabled);
         assert_eq!(
-            tuned_crt(),
-            CrtMaterial {
+            tuned_final_post(),
+            FinalPostMaterial {
                 bleed: s.bleed,
                 scanline: s.scanline,
                 mask: s.mask,
                 vignette: s.vignette,
+                ..tuned_final_post()
             }
         );
     }
@@ -341,14 +338,14 @@ mod tests {
             dither_enabled: false,
             ..Default::default()
         });
-        let camera = world.spawn(DitherPostProcess::default()).id();
+        let camera = world.spawn(FinalPostMaterial::default()).id();
         world.run_system_once(sync_display_effects).unwrap();
 
-        let pass = world.get::<DitherPostProcess>(camera).unwrap();
+        let pass = world.get::<FinalPostMaterial>(camera).unwrap();
         assert_eq!(pass.dither_strength, 0.0);
         // Quantization depth stays at its tuned value; the shader's
         // early-out is what makes off mean fully off.
-        assert_eq!(pass.color_steps, dither::tuned().color_steps);
+        assert_eq!(pass.color_steps, tuned_final_post().color_steps);
     }
 
     #[test]
@@ -361,19 +358,14 @@ mod tests {
             vignette: 0.2,
             ..Default::default()
         });
-        let camera = world.spawn(CrtMaterial::default()).id();
+        let camera = world.spawn(FinalPostMaterial::default()).id();
         world.run_system_once(sync_display_effects).unwrap();
 
-        let pass = world.get::<CrtMaterial>(camera).unwrap();
-        assert_eq!(
-            *pass,
-            CrtMaterial {
-                bleed: 0.7,
-                scanline: 0.5,
-                mask: 0.1,
-                vignette: 0.2,
-            }
-        );
+        let pass = world.get::<FinalPostMaterial>(camera).unwrap();
+        assert_eq!(pass.bleed, 0.7,);
+        assert_eq!(pass.scanline, 0.5);
+        assert_eq!(pass.mask, 0.1);
+        assert_eq!(pass.vignette, 0.2);
     }
 
     #[test]
@@ -383,12 +375,16 @@ mod tests {
             crt_enabled: false,
             ..Default::default()
         });
-        let camera = world.spawn(tuned_crt()).id();
+        let camera = world.spawn(tuned_final_post()).id();
         world.run_system_once(sync_display_effects).unwrap();
 
-        assert_eq!(
-            *world.get::<CrtMaterial>(camera).unwrap(),
-            CrtMaterial::default()
-        );
+        let pass = world.get::<FinalPostMaterial>(camera).unwrap();
+        assert_eq!(pass.bleed, 0.0);
+        assert_eq!(pass.scanline, 0.0);
+        assert_eq!(pass.mask, 0.0);
+        assert_eq!(pass.vignette, 0.0);
+        // The dither keeps its tuned strength: only the CRT half is
+        // disabled here.
+        assert_eq!(pass.dither_strength, 1.0);
     }
 }

@@ -1,11 +1,44 @@
 //! Teleporters: trigger rects in the scene that load another scene when
-//! the player touches one.
+//! the player touches one. The jump rides the transition (a fade to
+//! black, the scene swap behind the cover, the fade into the new
+//! scene) — the swap itself happens at the covered point, when the
+//! game state returns to [`crate::game_state::GameState::Scene`] and
+//! [`release_warp`] hands the queued warp to `transition_scene`.
 
 use bevy::prelude::*;
 
 use crate::editor::EditorState;
+use crate::game_state::GameState;
 use crate::scene::Scene;
+use crate::transition::{Effect, TransitionState};
 use crate::{CurrentScene, PendingTeleport, Player, TeleporterArmed};
+
+/// A teleporter the player touched, waiting for the transition's covered
+/// point to swap the scene. Distinct from [`PendingTeleport`], which
+/// means "swap now": queueing one of those directly would despawn the
+/// old scene while the fade was still opening.
+#[derive(Resource)]
+pub(crate) struct PendingSceneWarp {
+    pub(crate) target: String,
+    pub(crate) arrival: Vec2,
+}
+
+/// `OnEnter(Scene)`: fires at the transition's covered point — hands the
+/// queued warp to `transition_scene`, which swaps the scene behind the
+/// still-opaque cover.
+pub(crate) fn release_warp(
+    mut commands: Commands,
+    warp: Option<Res<PendingSceneWarp>>,
+) {
+    let Some(warp) = warp else {
+        return;
+    };
+    commands.insert_resource(PendingTeleport {
+        target: warp.target.clone(),
+        arrival: warp.arrival,
+    });
+    commands.remove_resource::<PendingSceneWarp>();
+}
 
 /// Runs after `move_player`: when the player's position lands inside a
 /// teleporter's trigger rect, queues a scene transition. Editing pauses
@@ -16,6 +49,7 @@ use crate::{CurrentScene, PendingTeleport, Player, TeleporterArmed};
 /// fires, and rearms once the player leaves it — so arriving inside a
 /// region (its spawn point) doesn't chain-teleport until the player
 /// walks out and back in.
+#[allow(clippy::too_many_arguments)]
 pub fn check_teleporters(
     mut commands: Commands,
     mut armed: Option<ResMut<TeleporterArmed>>,
@@ -23,12 +57,15 @@ pub fn check_teleporters(
     current: Option<Res<CurrentScene>>,
     editor: Option<Res<EditorState>>,
     pending: Option<Res<PendingTeleport>>,
+    warp: Option<Res<PendingSceneWarp>>,
+    mut transition: ResMut<TransitionState>,
+    mut next_state: ResMut<NextState<GameState>>,
     players: Query<&Transform, With<Player>>,
 ) {
     if editor.is_some_and(|editor| editor.open) {
         return;
     }
-    if pending.is_some() {
+    if pending.is_some() || warp.is_some() {
         return;
     }
     let Ok(transform) = players.single() else {
@@ -63,10 +100,18 @@ pub fn check_teleporters(
     let Some(teleporter) = fired else {
         return;
     };
-    commands.insert_resource(PendingTeleport {
-        target: teleporter.target.clone(),
-        arrival: teleporter.arrival.into(),
-    });
+    // The jump rides the transition: the fade closes over the street,
+    // the covered flip returns the game to Scene, and release_warp
+    // hands the swap to transition_scene behind the cover.
+    if transition.begin(GameState::Scene, Effect::Fade) {
+        commands.insert_resource(PendingSceneWarp {
+            target: teleporter.target.clone(),
+            arrival: teleporter.arrival.into(),
+        });
+        next_state.set(GameState::Transition);
+    } else {
+        warn!("teleporter ignored: a transition is already running");
+    }
 }
 
 #[cfg(test)]
@@ -107,6 +152,8 @@ mod tests {
             path: "scenes/devroom.scene".to_string(),
         });
         world.insert_resource(TeleporterArmed(vec![true]));
+        world.init_resource::<TransitionState>();
+        world.init_resource::<NextState<GameState>>();
         let player =
             player_at.map(|at| world.spawn((Player, Transform::from_translation(at))).id());
         (world, player)
@@ -117,18 +164,30 @@ mod tests {
     }
 
     #[test]
-    fn touching_a_teleporter_queues_a_transition() {
+    fn touching_a_teleporter_begins_a_warp() {
         let (mut world, _) = world_with(Some(Vec3::new(2.0, 0.9, 0.0)));
         world.run_system_once(check_teleporters).unwrap();
-        let pending = world.resource::<PendingTeleport>();
-        assert_eq!(pending.target, "scenes/room2.scene");
-        assert_eq!(pending.arrival, Vec2::new(1.0, 2.0));
+
+        // The warp queues for the covered point; the swap signal does
+        // not exist yet.
+        let warp = world.resource::<PendingSceneWarp>();
+        assert_eq!(warp.target, "scenes/room2.scene");
+        assert_eq!(warp.arrival, Vec2::new(1.0, 2.0));
+        assert!(world.get_resource::<PendingTeleport>().is_none());
+
+        // And the game rides the transition state (the fade is the
+        // call site's choice; transition.rs's own tests cover it).
+        assert!(matches!(
+            *world.resource::<NextState<GameState>>(),
+            NextState::Pending(GameState::Transition)
+        ));
     }
 
     #[test]
     fn standing_clear_does_not_teleport() {
         let (mut world, _) = world_with(Some(Vec3::new(0.0, 0.9, 0.0)));
         world.run_system_once(check_teleporters).unwrap();
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
         assert!(world.get_resource::<PendingTeleport>().is_none());
     }
 
@@ -137,7 +196,7 @@ mod tests {
         let (mut world, player) = world_with(None);
         assert!(player.is_none());
         world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingTeleport>().is_none());
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
     }
 
     #[test]
@@ -148,10 +207,50 @@ mod tests {
             arrival: Vec2::ZERO,
         });
         world.run_system_once(check_teleporters).unwrap();
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
         assert_eq!(
             world.resource::<PendingTeleport>().target,
             "scenes/already-going.scene"
         );
+    }
+
+    #[test]
+    fn a_running_transition_absorbs_re_triggers() {
+        let (mut world, _) = world_with(Some(Vec3::new(2.0, 0.9, 0.0)));
+        // A transition is mid-flight (say, the battle swirl): the
+        // teleporter must not derail it.
+        world
+            .resource_mut::<TransitionState>()
+            .begin(GameState::Battle, Effect::Swirl)
+            .then_some(())
+            .expect("the machine starts idle");
+        world.run_system_once(check_teleporters).unwrap();
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
+    }
+
+    #[test]
+    fn release_warp_hands_the_swap_to_transition_scene() {
+        let mut world = World::new();
+        world.insert_resource(PendingSceneWarp {
+            target: "scenes/room2.scene".into(),
+            arrival: Vec2::new(1.0, 2.0),
+        });
+
+        world.run_system_once(release_warp).unwrap();
+        world.flush();
+
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
+        let pending = world.resource::<PendingTeleport>();
+        assert_eq!(pending.target, "scenes/room2.scene");
+        assert_eq!(pending.arrival, Vec2::new(1.0, 2.0));
+    }
+
+    #[test]
+    fn release_warp_without_a_warp_is_quiet() {
+        let mut world = World::new();
+        world.run_system_once(release_warp).unwrap();
+        world.flush();
+        assert!(world.get_resource::<PendingTeleport>().is_none());
     }
 
     #[test]
@@ -161,7 +260,7 @@ mod tests {
         editor.open = true;
         world.insert_resource(editor);
         world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingTeleport>().is_none());
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
     }
 
     #[test]
@@ -169,14 +268,14 @@ mod tests {
         let (mut world, player) = world_with(Some(Vec3::new(2.0, 0.9, 0.0)));
         let player = player.unwrap();
         world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingTeleport>().is_some());
+        assert!(world.get_resource::<PendingSceneWarp>().is_some());
         assert!(!world.resource::<TeleporterArmed>().0[0]);
 
-        // The transition consumes the pending teleport; the player is
+        // The covered-point hand-off consumes the warp; the player is
         // still inside the region, so it stays quiet.
-        world.remove_resource::<PendingTeleport>();
+        world.remove_resource::<PendingSceneWarp>();
         world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingTeleport>().is_none());
+        assert!(world.get_resource::<PendingSceneWarp>().is_none());
 
         // Leaving rearms the trigger without firing it.
         set_player_at(&mut world, player, Vec2::new(0.0, 0.0));
@@ -184,10 +283,14 @@ mod tests {
         assert!(world.resource::<TeleporterArmed>().0[0]);
         assert!(world.get_resource::<PendingTeleport>().is_none());
 
-        // Re-entering fires it again.
+        // Re-entering fires it again. In the game the first transition
+        // has long completed (the machine rests after its reveal); the
+        // bare world skips the driver, so reset the machine to idle to
+        // stand in for that.
+        *world.resource_mut::<TransitionState>() = TransitionState::default();
         set_player_at(&mut world, player, Vec2::new(2.0, 0.0));
         world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingTeleport>().is_some());
+        assert!(world.get_resource::<PendingSceneWarp>().is_some());
     }
 
     #[test]
@@ -218,6 +321,8 @@ mod tests {
             path: "scenes/devroom.scene".to_string(),
         });
         world.insert_resource(TeleporterArmed(vec![false, true]));
+        world.init_resource::<TransitionState>();
+        world.init_resource::<NextState<GameState>>();
         world.spawn((
             Player,
             Transform::from_translation(Vec3::new(0.0, 0.9, 0.0)),
@@ -225,7 +330,7 @@ mod tests {
         world.run_system_once(check_teleporters).unwrap();
         // The first (disarmed) one is skipped; the second fires.
         assert_eq!(
-            world.resource::<PendingTeleport>().target,
+            world.resource::<PendingSceneWarp>().target,
             "scenes/second.scene"
         );
     }

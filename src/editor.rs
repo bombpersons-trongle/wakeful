@@ -18,7 +18,7 @@ use crate::assets::assets_root;
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
 use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
-use crate::systems::scene::spawn_background;
+use crate::systems::scene::{spawn_background, SceneGraphics};
 use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player};
 
 /// Read-only camera access for picking rays in the editor.
@@ -209,6 +209,7 @@ fn ui(
     current: Option<Res<CurrentScene>>,
     state: ResMut<EditorState>,
     background_sprites: Query<Entity, With<BackgroundSprite>>,
+    graphics: Option<Res<SceneGraphics>>,
 ) {
     let state = state.into_inner();
     if !state.open {
@@ -227,6 +228,9 @@ fn ui(
     egui::Window::new("Scene editor").show(ctx, |ui| {
         camera_ui(ui, &mut scene);
         ui.separator();
+        let Some(graphics) = graphics else {
+            return;
+        };
         background_ui(
             ui,
             &mut scene,
@@ -234,6 +238,7 @@ fn ui(
             &mut commands,
             &assets,
             &background_sprites,
+            &graphics,
         );
         ui.separator();
         walkable_ui(ui, &mut scene);
@@ -290,6 +295,7 @@ fn background_ui(
     commands: &mut Commands,
     assets: &AssetServer,
     sprites: &Query<Entity, With<BackgroundSprite>>,
+    graphics: &SceneGraphics,
 ) {
     ui.label("Background image (path under assets/, empty = none)");
     ui.text_edit_singleline(field);
@@ -301,7 +307,7 @@ fn background_ui(
                 commands.entity(entity).despawn();
             }
             if let Some(path) = &scene.background {
-                spawn_background(commands, assets, path);
+                spawn_background(commands, assets, path, graphics);
             }
         }
     }
