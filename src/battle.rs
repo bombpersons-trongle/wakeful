@@ -43,13 +43,32 @@ pub(crate) enum Brain {
     },
 }
 
-/// A named action handler: a function in the battle script that
-/// registered it; called with the actor's id, returns the recovery
-/// time.
+/// What runs when a participant picks an action.
+#[derive(Clone)]
+pub(crate) enum ActionBody {
+    /// A function in the registering battle script: called once with
+    /// the actor's id, returns the recovery time.
+    Inline {
+        source: crate::scripts::ScriptSource,
+        fn_name: String,
+    },
+    /// A choreography file: `run(actor, state)` is ticked every fixed
+    /// tick until it returns a recovery number. The script moves
+    /// fighters with `battle_set_position`, plays clips with
+    /// `battle_emote`, and deals damage whenever it likes; `state`
+    /// carries the elapsed seconds, the actor's live position and its
+    /// starting one.
+    File { script: std::sync::Arc<crate::scripts::ActorScript> },
+    /// A choreography file registered by path before its battle
+    /// staged — `stage_battle` compiles it with the full script
+    /// environment (input, UI, stores), exactly like brains.
+    FilePath { path: String },
+}
+
+/// A named action handler.
 #[derive(Clone)]
 pub(crate) struct ActionHandler {
-    pub(crate) source: crate::scripts::ScriptSource,
-    pub(crate) fn_name: String,
+    pub(crate) body: ActionBody,
 }
 
 /// A participant as the battle script defines it.
@@ -111,6 +130,17 @@ pub(crate) enum BattleRequest {
         pitch: f32,
         dolly: f32,
     },
+    /// Register a choreography file as an action, by path.
+    ActionFile { name: String, path: String },
+    /// Move a fighter (x/z; the staged height is kept).
+    SetPosition {
+        participant: String,
+        position: [f32; 2],
+    },
+    /// Park the battle with a result: no more turns, the outro screens
+    /// run script-side, and `end_battle` begins the exit when they're
+    /// done. Unlike `End`, no transition fires here.
+    Finish { result: String },
 }
 
 /// A participant as scripts see it: engine fields plus the bag merged
@@ -150,6 +180,9 @@ struct ScriptState {
     /// All live participants, republished every running tick for
     /// `battle_participants()` readers.
     participants: Vec<rhai::Map>,
+    /// The parked result once `finish_battle` ran; readers expose it
+    /// to the outro screens.
+    result: Option<String>,
 }
 
 /// The battle camera as scripts see it, published every tick.
@@ -217,6 +250,14 @@ impl BattleHandle {
         self.lock().participants = participants;
     }
 
+    pub(crate) fn set_result(&self, result: Option<String>) {
+        self.lock().result = result;
+    }
+
+    pub(crate) fn result(&self) -> Option<String> {
+        self.lock().result.clone()
+    }
+
     pub(crate) fn participants(&self) -> Vec<rhai::Map> {
         self.lock().participants.clone()
     }
@@ -280,7 +321,25 @@ pub(crate) struct Combatant {
     pub(crate) time_until_act: f32,
     pub(crate) bag: rhai::Map,
     pub(crate) brain: Option<Brain>,
+    /// Out of the fight: its die clip played and it no longer acts.
+    pub(crate) dead: bool,
 }
+
+/// The acting state: a choreography file owns the acting participant
+/// until its `run` returns a recovery time.
+pub(crate) struct Acting {
+    pub(crate) participant: usize,
+    pub(crate) body: ActionBody,
+    /// Seconds since the action started.
+    pub(crate) elapsed: f32,
+    /// Where the actor stood when it started (choreographies return
+    /// here).
+    pub(crate) home: Vec3,
+}
+
+/// How long a dead fighter's die clip needs before the engine stops
+/// rendering the corpse (it is under the floor by then).
+const DIE_SETTLE_SECS: f32 = 1.4;
 
 /// The engine-side battle, present as a resource only while one runs.
 /// The transition choreography (the capture, the curtain, the cover)
@@ -293,14 +352,21 @@ pub(crate) struct Battle {
     /// Action handlers by name.
     pub(crate) actions: BTreeMap<String, ActionHandler>,
     pub(crate) result: Option<String>,
+    /// The participant currently running a choreography file, if any.
+    pub(crate) acting: Option<Acting>,
+    /// (participant index, seconds left) for fighters whose die clip
+    /// is playing; the corpse hides when its timer runs out.
+    pub(crate) dying: Vec<(usize, f32)>,
 }
 
 impl Battle {
-    /// The participant with the lowest time-until-act, if any.
+    /// The participant with the lowest time-until-act, if any. The
+    /// dead never act again.
     pub(crate) fn next_actor(&self) -> Option<usize> {
         self.participants
             .iter()
             .enumerate()
+            .filter(|(_, c)| !c.dead)
             .min_by(|a, b| a.1.time_until_act.total_cmp(&b.1.time_until_act))
             .map(|(i, _)| i)
     }
@@ -404,9 +470,50 @@ pub(crate) fn register_battle_api(
             battle.push(BattleRequest::Action {
                 name: name.to_owned(),
                 handler: ActionHandler {
-                    source: source.clone(),
-                    fn_name: fn_name.to_owned(),
+                    body: ActionBody::Inline {
+                        source: source.clone(),
+                        fn_name: fn_name.to_owned(),
+                    },
                 },
+            });
+        });
+    }
+    {
+        let battle = battle.clone();
+        engine.register_fn("battle_action_file", move |name: &str, path: &str| {
+            battle.push(BattleRequest::ActionFile {
+                name: name.to_owned(),
+                path: path.to_owned(),
+            });
+        });
+    }
+    {
+        let battle = battle.clone();
+        engine.register_fn(
+            "battle_set_position",
+            move |participant: &str, pos: rhai::Array| -> Result<(), Box<rhai::EvalAltResult>> {
+                let read = |v: &rhai::Dynamic| -> Option<f32> {
+                    v.clone().try_cast::<f64>().map(|f| f as f32)
+                };
+                let (Some(x), Some(z)) = (pos.first().and_then(read), pos.get(1).and_then(read))
+                else {
+                    return Err(runtime_error(
+                        "battle_set_position expects [x, z] floats".to_owned(),
+                    ));
+                };
+                battle.push(BattleRequest::SetPosition {
+                    participant: participant.to_owned(),
+                    position: [x, z],
+                });
+                Ok(())
+            },
+        );
+    }
+    {
+        let battle = battle.clone();
+        engine.register_fn("finish_battle", move |result: &str| {
+            battle.push(BattleRequest::Finish {
+                result: result.to_owned(),
             });
         });
     }
@@ -469,6 +576,23 @@ pub(crate) fn register_battle_api(
 /// live list, so the engine publishes it into the handle each tick.
 pub(crate) fn register_battle_readers(engine: &mut Engine, battle: &BattleHandle) {
     use crate::scripts::runtime_error;
+
+    {
+        let battle = battle.clone();
+        engine.register_fn("battle_finished", move || -> bool {
+            battle.result().is_some()
+        });
+    }
+
+    {
+        let battle = battle.clone();
+        engine.register_fn("battle_result", move || -> rhai::Dynamic {
+            match battle.result() {
+                Some(result) => Dynamic::from(result),
+                None => Dynamic::UNIT,
+            }
+        });
+    }
 
     {
         let battle = battle.clone();
@@ -555,13 +679,44 @@ pub(crate) fn camera_from_look(position: Vec3, look: Vec3) -> (Vec3, Vec2) {
 
 // ---------------------------------------------------------------- engine systems
 
+/// Fighters in the sequencer: transform for choreography moves,
+/// visibility for settled corpses. Disjoint from the cameras (they
+/// carry neither camera marker), so Transform accesses don't conflict.
+type Fighters<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Transform,
+        &'static mut Visibility,
+    ),
+    (
+        With<BattleParticipant>,
+        Without<BattleCamera>,
+        Without<crate::systems::camera::SceneCamera>,
+    ),
+>;
+
+/// The battle camera (or the scene camera while it flies).
+type Cameras<'w, 's> = Query<
+    'w,
+    's,
+    (&'static mut Transform, &'static Camera),
+    Or<(With<SceneCamera>, With<BattleCamera>)>,
+>;
+
 /// Everything the battle systems need, gathered once.
-#[allow(clippy::type_complexity)]
 #[derive(SystemParam)]
 pub(crate) struct BattleTurnParams<'w, 's> {
     pub(crate) battle: ResMut<'w, BattleHandle>,
     pub(crate) state: Option<ResMut<'w, Battle>>,
     pub(crate) camera: Query<'w, 's, (&'static Transform, &'static Projection), With<BattleCamera>>,
+    /// Set-position writes and corpse hiding go through this; fighters
+    /// are disjoint from the battle camera, so the Transform accesses
+    /// don't conflict.
+    pub(crate) fighters: Fighters<'w, 's>,
+    /// Deaths hand their die clip to the fighter's emote request.
+    pub(crate) emote_targets: Query<'w, 's, &'static mut EmoteRequest>,
+    pub(crate) time: Res<'w, Time>,
 }
 
 /// Drains script requests, runs phases, and sequences turns. Sits at
@@ -579,7 +734,10 @@ pub(crate) fn battle_requests(
     mut transition: ResMut<TransitionState>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
-    mut cameras: Query<(&mut Transform, &Camera), Or<(With<SceneCamera>, With<BattleCamera>)>>,
+    // Fighters are disjoint from the cameras (they carry neither camera
+    // marker), which keeps the two Transform accesses compatible.
+    mut fighters: Fighters,
+    mut cameras: Cameras,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -600,6 +758,36 @@ pub(crate) fn battle_requests(
                     b.actions.insert(name, handler);
                 } else {
                     pending.actions.insert(name, handler);
+                }
+            }
+            BattleRequest::ActionFile { name, path } => {
+                let handler = ActionHandler {
+                    body: ActionBody::FilePath { path },
+                };
+                if let Some(b) = battle_state.as_mut() {
+                    b.actions.insert(name, handler);
+                } else {
+                    pending.actions.insert(name, handler);
+                }
+            }
+            BattleRequest::SetPosition {
+                participant,
+                position,
+            } => {
+                if let Some(b) = battle_state.as_mut()
+                    && let Some(c) = b.participants.iter_mut().find(|c| c.id == participant)
+                {
+                    c.position = [position[0], c.position.y, position[1]].into();
+                    if let Ok((mut transform, _)) = fighters.get_mut(c.entity) {
+                        transform.translation = c.position;
+                    }
+                }
+            }
+            BattleRequest::Finish { result } => {
+                if let Some(b) = battle_state.as_mut() {
+                    b.result = Some(result);
+                } else {
+                    bevy::log::warn!("battle: finish_battle with no battle running");
                 }
             }
             BattleRequest::Brain { participant, brain } => {
@@ -667,7 +855,14 @@ pub(crate) fn battle_requests(
 /// the time this runs the world is the fight.
 pub(crate) fn battle_turns(mut params: BattleTurnParams) {
     if let Some(state) = params.state.as_mut() {
-        sequence_turn(&params.battle, &params.camera, state);
+        sequence_turn(
+            &params.battle,
+            &params.camera,
+            &mut params.fighters,
+            &mut params.emote_targets,
+            params.time.delta_secs(),
+            state,
+        );
     }
 }
 
@@ -742,6 +937,7 @@ pub(crate) fn stage_battle(
             time_until_act: def.time_until_act,
             bag: def.bag.clone(),
             brain,
+            dead: false,
         });
     }
     // The battle camera takes the script's pose; the scene camera is
@@ -767,11 +963,30 @@ pub(crate) fn stage_battle(
             handle.set_store(&store_key, value.clone());
         }
     }
+    // Choreography files compile with the full environment too, exactly
+    // like brains (they share it: input, UI, the battle store). One
+    // that fails leaves a FilePath body, which warns and idles if the
+    // script ever picks it.
+    let mut actions = std::mem::take(&mut pending.actions);
+    for (name, handler) in actions.iter_mut() {
+        if let ActionBody::FilePath { path } = &handler.body {
+            match crate::scripts::ActorScript::load(path, env.clone().with_store(path)) {
+                Some(script) => {
+                    handler.body = ActionBody::File {
+                        script: std::sync::Arc::new(script),
+                    };
+                }
+                None => bevy::log::warn!("battle: action '{name}' failed to compile: {path}"),
+            }
+        }
+    }
     commands.insert_resource(Battle {
         arena,
         participants,
-        actions: std::mem::take(&mut pending.actions),
+        actions,
         result: None,
+        acting: None,
+        dying: Vec::new(),
     });
     commands.entity(graphics.0).insert(Visibility::Visible);
 }
@@ -819,6 +1034,9 @@ pub(crate) fn cleanup_battle(
 fn sequence_turn(
     battle: &BattleHandle,
     camera: &Query<(&Transform, &Projection), With<BattleCamera>>,
+    fighters: &mut Fighters,
+    emote_targets: &mut Query<&mut EmoteRequest>,
+    dt: f32,
     state: &mut Battle,
 ) {
     // Script-side bag mutations land in the store ("bag:<id>:<key>");
@@ -846,6 +1064,7 @@ fn sequence_turn(
         .map(|c| participant_map(&c.id, c.position, c.time_until_act, &c.bag))
         .collect();
     battle.publish_participants(maps);
+    battle.set_result(state.result.clone());
 
     // Publish the camera snapshot for `battle_screen_pos`.
     if let Ok((transform, Projection::Perspective(perspective))) = camera.single() {
@@ -857,6 +1076,48 @@ fn sequence_turn(
             pitch,
             fov_radians: fov,
         });
+    }
+
+    // Corpses settle: when a dead fighter's die clip has played, the
+    // engine stops rendering the body (it is under the floor by then,
+    // and the pause-at-final-seek hold does not survive a clip swap).
+    let mut settled = Vec::new();
+    for (index, remaining) in state.dying.iter_mut() {
+        *remaining -= dt;
+        if *remaining <= 0.0 {
+            settled.push(*index);
+        }
+    }
+    state.dying.retain(|(_, remaining)| *remaining > 0.0);
+    for index in settled {
+        if let Some(c) = state.participants.get(index)
+            && let Ok((_, mut visibility)) = fighters.get_mut(c.entity)
+        {
+            *visibility = Visibility::Hidden;
+        }
+    }
+
+    // A finished battle is parked: `finish_battle` set the result, the
+    // outro screens run script-side, and `end_battle` begins the exit
+    // when they are done. No more turns; the dead still settle above.
+    if state.result.is_some() {
+        return;
+    }
+
+    // An acting participant owns the clock: its choreography file is
+    // ticked until it returns a recovery time, which is when the next
+    // turn may come up (and the dead are reaped).
+    if state.acting.is_some() {
+        state.acting.as_mut().unwrap().elapsed += dt;
+        match tick_action(state, dt) {
+            Some(recovery) => {
+                let index = state.acting.as_ref().unwrap().participant;
+                state.participants[index].time_until_act += recovery;
+                state.acting = None;
+                play_emotes(emote_targets, reap_deaths(state));
+            }
+            None => return,
+        }
     }
 
     // Give every participant a little time back each tick? No: only
@@ -899,8 +1160,39 @@ fn sequence_turn(
                 state.participants[index].time_until_act += 1.0;
                 return;
             };
-            let recovery = run_action(&handler, &id);
-            state.participants[index].time_until_act += recovery;
+            match handler.body {
+                // One-shot handlers run and are done in this tick.
+                ActionBody::Inline { .. } => {
+                    let recovery = run_action(&handler, &id);
+                    state.participants[index].time_until_act += recovery;
+                    play_emotes(emote_targets, reap_deaths(state));
+                }
+                // Choreography files become the acting state and tick
+                // from here on; the first tick runs in this one.
+                body @ (ActionBody::File { .. } | ActionBody::FilePath { .. }) => {
+                    if let ActionBody::FilePath { path } = &body {
+                        warn!(
+                            "battle: action '{action_name}' never compiled ({path}); idling"
+                        );
+                        state.participants[index].time_until_act += 1.0;
+                        return;
+                    }
+                    state.acting = Some(Acting {
+                        participant: index,
+                        body,
+                        elapsed: 0.0,
+                        home: state.participants[index].position,
+                    });
+                    match tick_action(state, dt) {
+                        Some(recovery) => {
+                            state.participants[index].time_until_act += recovery;
+                            state.acting = None;
+                            play_emotes(emote_targets, reap_deaths(state));
+                        }
+                        None => {}
+                    }
+                }
+            }
         }
         Err(e) => {
             warn!("battle: brain for {id} errored: {e}");
@@ -932,27 +1224,118 @@ fn decide_with_brain(brain: &Brain, participant: rhai::Map) -> Result<Option<Dyn
 }
 
 fn run_action(handler: &ActionHandler, actor_id: &str) -> f32 {
-    let inner = handler
-        .source
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
+    let ActionBody::Inline { source, fn_name } = &handler.body else {
+        return 1.0;
+    };
+    let inner = source.lock().unwrap_or_else(PoisonError::into_inner);
     let Some(inner) = inner.as_ref() else {
-        warn!("battle: action '{}' lost its source", handler.fn_name);
+        warn!("battle: action '{fn_name}' lost its source");
         return 1.0;
     };
     let mut scope = Scope::new();
-    match inner.engine.call_fn::<f64>(
-        &mut scope,
-        &inner.ast,
-        &handler.fn_name,
-        (actor_id.to_string(),),
-    ) {
+    match inner.engine.call_fn::<f64>(&mut scope, &inner.ast, fn_name, (actor_id.to_string(),)) {
         Ok(recovery) => recovery as f32,
         Err(e) => {
-            warn!("battle: action '{}' errored: {e}", handler.fn_name);
+            warn!("battle: action '{fn_name}' errored: {e}");
             1.0
         }
     }
+}
+
+/// Hands die clips to the fighters' emote requests.
+fn play_emotes(
+    emote_targets: &mut Query<&mut EmoteRequest>,
+    played: Vec<(Entity, String)>,
+) {
+    for (entity, clip) in played {
+        if let Ok(mut request) = emote_targets.get_mut(entity) {
+            request.emote = Some(clip);
+        }
+    }
+}
+
+/// Ticks the acting participant's choreography file: `run(actor,
+/// state)` returning `()` means "still running", a number ends the
+/// action with that recovery. One tick of lag on `battle_set_position`
+/// (the request drains before this) is invisible at 60hz.
+fn tick_action(state: &mut Battle, dt: f32) -> Option<f32> {
+    let acting = state.acting.as_ref()?;
+    let ActionBody::File { script } = &acting.body else {
+        return Some(1.0);
+    };
+    let c = &state.participants[acting.participant];
+    let actor = participant_map(&c.id, c.position, c.time_until_act, &c.bag);
+    let mut state_map = rhai::Map::new();
+    state_map.insert("time".into(), Dynamic::from(acting.elapsed as f64));
+    state_map.insert(
+        "pos".into(),
+        Dynamic::from(vec![
+            Dynamic::from(c.position.x as f64),
+            Dynamic::from(c.position.y as f64),
+            Dynamic::from(c.position.z as f64),
+        ]),
+    );
+    state_map.insert(
+        "home".into(),
+        Dynamic::from(vec![
+            Dynamic::from(acting.home.x as f64),
+            Dynamic::from(acting.home.z as f64),
+        ]),
+    );
+    state_map.insert("dt".into(), Dynamic::from(dt as f64));
+    let mut scope = Scope::new();
+    match script.call_dynamic2(&mut scope, "run", actor.into(), state_map.into()) {
+        Ok(choice) => {
+            if choice.is_unit() {
+                return None;
+            }
+            let recovery = choice.try_cast::<f64>().unwrap_or(1.0) as f32;
+            Some(recovery)
+        }
+        Err(e) => {
+            warn!("battle: choreography errored: {e}");
+            Some(1.0)
+        }
+    }
+}
+
+/// After an action lands: anyone whose hp hit zero dies — the die clip
+/// plays and the body settles under the floor — and when a whole side
+/// is gone the battle parks with its result. The outcome lives in
+/// `state.result` for the outro scripts; returns the (entity, clip)
+/// pairs the caller must hand to the emote driver.
+fn reap_deaths(state: &mut Battle) -> Vec<(Entity, String)> {
+    let mut deaths = Vec::new();
+    for (index, c) in state.participants.iter().enumerate() {
+        if c.dead {
+            continue;
+        }
+        let hp = c.bag.get("hp").and_then(|v| v.clone().try_cast::<f64>());
+        if hp.is_none_or(|hp| hp > 0.0) {
+            continue;
+        }
+        deaths.push(index);
+    }
+    let mut played = Vec::new();
+    for index in deaths {
+        let c = &mut state.participants[index];
+        c.dead = true;
+        played.push((c.entity, "die".to_owned()));
+        state.dying.push((index, DIE_SETTLE_SECS));
+    }
+    let is_player = |c: &Combatant| {
+        c.bag
+            .get("player")
+            .is_some_and(|v| v.clone().as_bool() == Ok(true))
+    };
+    let players_alive = state.participants.iter().any(|c| !c.dead && is_player(c));
+    let monsters_alive = state.participants.iter().any(|c| !c.dead && !is_player(c));
+    if !monsters_alive {
+        state.result = Some("victory".to_owned());
+    } else if !players_alive {
+        state.result = Some("defeat".to_owned());
+    }
+    played
 }
 
 // ---------------------------------------------------------------- fade overlay
@@ -962,6 +1345,160 @@ fn run_action(handler: &ActionHandler, actor_id: &str) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_dead_never_act_again() {
+        let battle = Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![
+                Combatant {
+                    id: "hero".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.1,
+                    bag: rhai::Map::new(),
+                    brain: None,
+                    dead: true,
+                },
+                Combatant {
+                    id: "goblin".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 9.0,
+                    bag: rhai::Map::new(),
+                    brain: None,
+                    dead: false,
+                },
+            ],
+            actions: BTreeMap::new(),
+            result: None,
+            acting: None,
+            dying: Vec::new(),
+        };
+        assert_eq!(
+            battle
+                .next_actor()
+                .map(|i| battle.participants[i].id.as_str()),
+            Some("goblin"),
+            "a dead participant with the lower clock must not be picked"
+        );
+    }
+
+    /// A choreography file ticks until its `run` returns a number: `()`
+    /// keeps the acting state (the sequencer parks), a number ends the
+    /// action with that recovery.
+    #[test]
+    fn choreography_ticks_until_it_returns_a_recovery() {
+        use crate::scripts::{ActorScript, ScriptEnv};
+        use crate::systems::ui::UiApi;
+
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            UiApi::new(),
+            crate::world_state::WorldState::default(),
+            BattleHandle::new(),
+        );
+        let script = std::sync::Arc::new(
+            ActorScript::compile_with_handle(
+                "fn run(actor, state) { if state.time < 1.0 { () } else { 2.5 } }",
+                env,
+            )
+            .expect("the harness choreography must compile"),
+        );
+        let mut battle = Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![Combatant {
+                id: "hero".into(),
+                entity: Entity::PLACEHOLDER,
+                position: Vec3::ZERO,
+                time_until_act: 0.0,
+                bag: rhai::Map::new(),
+                brain: None,
+                dead: false,
+            }],
+            actions: BTreeMap::new(),
+            result: None,
+            acting: Some(Acting {
+                participant: 0,
+                body: ActionBody::File { script },
+                elapsed: 0.0,
+                home: Vec3::ZERO,
+            }),
+            dying: Vec::new(),
+        };
+
+        battle.acting.as_mut().unwrap().elapsed = 0.2;
+        assert_eq!(tick_action(&mut battle, 1.0 / 60.0), None, "still running: parked");
+        battle.acting.as_mut().unwrap().elapsed = 1.4;
+        assert_eq!(
+            tick_action(&mut battle, 1.0 / 60.0),
+            Some(2.5),
+            "the returned number is the recovery"
+        );
+    }
+
+    /// Deaths reap after an action: the die clip plays, the corpse
+    /// settles, and a wiped side parks the battle with its result.
+    #[test]
+    fn reaping_buries_the_slain_and_finishes_the_fight() {
+        let player_bag = |hp: f64| -> rhai::Map {
+            [
+                ("hp".into(), Dynamic::from(hp)),
+                ("player".into(), Dynamic::from(true)),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let monster_bag = |hp: f64| -> rhai::Map {
+            [("hp".into(), Dynamic::from(hp))].into_iter().collect()
+        };
+        let mut battle = Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![
+                Combatant {
+                    id: "hero".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.0,
+                    bag: player_bag(0.0),
+                    brain: None,
+                    dead: false,
+                },
+                Combatant {
+                    id: "goblin".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.0,
+                    bag: monster_bag(10.0),
+                    brain: None,
+                    dead: false,
+                },
+            ],
+            actions: BTreeMap::new(),
+            result: None,
+            acting: None,
+            dying: Vec::new(),
+        };
+
+        let played = reap_deaths(&mut battle);
+        assert!(battle.participants[0].dead, "the hero at 0 hp is dead");
+        assert!(!battle.participants[1].dead, "the goblin stands");
+        assert_eq!(
+            played,
+            vec![(Entity::PLACEHOLDER, "die".to_owned())],
+            "the corpse plays its die clip"
+        );
+        assert_eq!(battle.dying.len(), 1, "the corpse settles on a timer");
+        assert_eq!(battle.result.as_deref(), Some("defeat"), "players wiped");
+
+        // The last monster falls: the fight parks as a victory.
+        battle.participants[1]
+            .bag
+            .insert("hp".into(), Dynamic::from(0.0));
+        let played = reap_deaths(&mut battle);
+        assert_eq!(played.len(), 1);
+        assert_eq!(battle.result.as_deref(), Some("victory"));
+    }
 
     #[test]
     fn the_lowest_time_until_act_acts_first() {
@@ -975,6 +1512,7 @@ mod tests {
                     time_until_act: 1.2,
                     bag: rhai::Map::new(),
                     brain: None,
+                    dead: false,
                 },
                 Combatant {
                     id: "goblin".into(),
@@ -983,10 +1521,13 @@ mod tests {
                     time_until_act: 0.3,
                     bag: rhai::Map::new(),
                     brain: None,
+                    dead: false,
                 },
             ],
             actions: BTreeMap::new(),
             result: None,
+            acting: None,
+            dying: Vec::new(),
         };
         assert_eq!(
             battle
@@ -1068,6 +1609,100 @@ mod tests {
             .call_dynamic(&mut scope, "decide", participant.into())
             .unwrap();
         assert_eq!(choice.into_string().unwrap(), "attack");
+    }
+
+    /// The shipped attack choreography: closes in, strikes exactly
+    /// once on the damage beat, and ends with its recovery.
+    #[test]
+    fn the_shipped_attack_choreography_runs_in_and_strikes() {
+        use crate::scripts::{ActorScript, ScriptEnv};
+        use crate::systems::ui::UiApi;
+
+        let handle = BattleHandle::new();
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            UiApi::new(),
+            crate::world_state::WorldState::default(),
+            handle.clone(),
+        );
+        let script = ActorScript::load("scripts/battle/attack_weapon.rhai", env)
+            .expect("the shipped attack choreography must compile");
+
+        let map = |id: &str, z: f64| -> rhai::Map {
+            [
+                ("id".into(), Dynamic::from(id.to_owned())),
+                ("x".into(), Dynamic::from(0.0)),
+                ("y".into(), Dynamic::from(0.0)),
+                ("z".into(), Dynamic::from(z)),
+            ]
+            .into_iter()
+            .collect()
+        };
+        handle.publish_participants(vec![map("hero", 3.0), map("goblin", -3.0)]);
+        handle.set_store("bag:goblin:hp", Dynamic::from(30.0));
+
+        let state = |time: f64| -> rhai::Map {
+            [
+                ("time".into(), Dynamic::from(time)),
+                ("dt".into(), Dynamic::from(0.05)),
+                (
+                    "pos".into(),
+                    Dynamic::from(vec![Dynamic::from(0.0), Dynamic::from(0.0), Dynamic::from(3.0)]),
+                ),
+                (
+                    "home".into(),
+                    Dynamic::from(vec![Dynamic::from(0.0), Dynamic::from(3.0)]),
+                ),
+            ]
+            .into_iter()
+            .collect()
+        };
+        let tick = |time: f64| -> Dynamic {
+            script
+                .call_dynamic2(
+                    &mut Scope::new(),
+                    "run",
+                    map("hero", 3.0).into(),
+                    state(time).into(),
+                )
+                .expect("the choreography must not error")
+        };
+
+        // Closing in: the fighter moves.
+        assert!(tick(0.1).is_unit());
+        assert!(
+            handle
+                .take_requests()
+                .iter()
+                .any(|r| matches!(r, BattleRequest::SetPosition { .. })),
+            "the run-in moves the fighter"
+        );
+
+        // Just before the beat: no damage yet.
+        assert!(tick(0.98).is_unit());
+        handle.take_requests();
+        assert!(
+            handle.get_store("bag:goblin:hp").as_float() == Ok(30.0),
+            "staging seeded the goblin bag"
+        );
+
+        // Crossing the beat: the strike lands, exactly once.
+        assert!(tick(1.02).is_unit());
+        handle.take_requests();
+        assert!(
+            handle.get_store("bag:goblin:hp").as_float() == Ok(18.0),
+            "the strike lands"
+        );
+        assert!(tick(1.06).is_unit());
+        handle.take_requests();
+        assert!(
+            handle.get_store("bag:goblin:hp").as_float() == Ok(18.0),
+            "the strike must not repeat"
+        );
+
+        // Done: back home, recovery returned.
+        let done = tick(3.2);
+        assert_eq!(done.try_cast::<f64>(), Some(1.4));
     }
 
     #[test]
@@ -1156,6 +1791,8 @@ mod tests {
             participants: vec![],
             actions: BTreeMap::new(),
             result: None,
+            acting: None,
+            dying: Vec::new(),
         });
         world
             .resource_mut::<BattleHandle>()
@@ -1173,6 +1810,89 @@ mod tests {
         assert!((flown.translation - idle.translation).length() - 1.0 < 1e-4);
         // The inactive scene camera never flew.
         assert_eq!(scene_pose(&mut world), scene_original);
+    }
+
+    /// The choreography primitives through the real drain:
+    /// `battle_set_position` moves the combatant and its transform in
+    /// the same tick, and `finish_battle` parks the battle without
+    /// starting a transition.
+    #[test]
+    fn set_position_and_finish_flow_through_the_drain() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let mut world = World::new();
+        world.insert_resource(BattleHandle::new());
+        world.init_resource::<crate::transition::TransitionState>();
+        world.init_resource::<NextState<GameState>>();
+        world.init_resource::<PendingBattleStart>();
+        world.spawn((
+            BattleCamera,
+            Camera {
+                is_active: true,
+                ..default()
+            },
+            Transform::from_xyz(10.0, 9.0, 10.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+            Projection::default(),
+        ));
+        let fighter = world
+            .spawn((
+                BattleParticipant,
+                Visibility::default(),
+                Transform::from_xyz(0.0, 0.0, 3.0),
+            ))
+            .id();
+        world.insert_resource(Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![Combatant {
+                id: "hero".into(),
+                entity: fighter,
+                position: Vec3::new(0.0, 0.0, 3.0),
+                time_until_act: 0.0,
+                bag: rhai::Map::new(),
+                brain: None,
+                dead: false,
+            }],
+            actions: BTreeMap::new(),
+            result: None,
+            acting: None,
+            dying: Vec::new(),
+        });
+
+        world
+            .resource_mut::<BattleHandle>()
+            .push(BattleRequest::SetPosition {
+                participant: "hero".into(),
+                position: [1.5, -2.0],
+            });
+        world.run_system_once(battle_requests).unwrap();
+
+        let battle = world.resource::<Battle>();
+        assert_eq!(
+            battle.participants[0].position,
+            Vec3::new(1.5, 0.0, -2.0),
+            "the combatant's staged position moved (y kept)"
+        );
+        let transform = world.get::<Transform>(fighter).expect("fighter transform");
+        assert_eq!(
+            transform.translation,
+            Vec3::new(1.5, 0.0, -2.0),
+            "the model moved this tick"
+        );
+
+        // finish_battle parks: the result is set, no transition fires.
+        world
+            .resource_mut::<BattleHandle>()
+            .push(BattleRequest::Finish {
+                result: "victory".into(),
+            });
+        world.run_system_once(battle_requests).unwrap();
+        let battle = world.resource::<Battle>();
+        assert_eq!(battle.result.as_deref(), Some("victory"));
+        let state = world.resource::<NextState<GameState>>();
+        assert!(
+            matches!(state, NextState::Unchanged),
+            "finishing must not begin the exit transition"
+        );
     }
 
     #[test]

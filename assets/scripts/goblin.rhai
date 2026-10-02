@@ -64,7 +64,9 @@ fn greet() {
 // participants. The engine owns the staging and the turn sequencer;
 // everything about WHO fights and WHAT the actions do lives here.
 fn challenge() {
-    battle_action("attack", "attack_action");
+    // The attack is a choreography file: the hero runs in, swings, and
+    // the damage lands on the strike beat (see the file's header).
+    battle_action_file("attack", "scripts/battle/attack_weapon.rhai");
     battle_action("flee", "flee_action");
     start_battle(
         "models/arena.glb",
@@ -96,20 +98,6 @@ fn challenge() {
 // The attack: whoever acts plays a swing-ish emote, the nearest foe
 // (here: the only foe) takes fixed damage, and the number floats up
 // over them. The recovery time this returns is what spaces the turns.
-fn attack_action(actor_id) {
-    battle_emote(actor_id, "pick_up");
-    let foe = first_foe(actor_id);
-    if foe != () {
-        let hp = battle_bag_get(foe.id, "hp") - 12.0;
-        battle_bag_set(foe.id, "hp", hp);
-        float_text(foe, "-12");
-        if hp <= 0 {
-            end_battle("victory");
-        }
-    }
-    1.2
-}
-
 fn flee_action(actor_id) {
     end_battle("fled");
     0.5

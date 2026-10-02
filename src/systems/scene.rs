@@ -474,7 +474,7 @@ mod tests {
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
-        let mut images = Assets::<Image>::default();
+        let images = Assets::<Image>::default();
         server.register_asset(&images);
         world.insert_resource(server);
         world.insert_resource(crate::systems::ui::UiApi::new());

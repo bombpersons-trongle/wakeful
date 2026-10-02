@@ -681,6 +681,18 @@ impl ActorScript {
         self.script.call(scope, name, (arg,))
     }
 
+    /// The two-argument flavor (battle choreographies take the actor
+    /// and a state map).
+    pub fn call_dynamic2(
+        &self,
+        scope: &mut Scope,
+        name: &str,
+        first: Dynamic,
+        second: Dynamic,
+    ) -> Result<Dynamic, ScriptError> {
+        self.script.call(scope, name, (first, second))
+    }
+
     /// Runs one `on_update`. The position is `None` when the script (or
     /// its missing `on_update`) wants the actor to stay put;
     /// `Some([x, z])` is the new ground position. `said` carries

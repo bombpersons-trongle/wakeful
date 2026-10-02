@@ -19,6 +19,17 @@ fn on_update(dt) {
     }
     remember("up", true);
 
+    // TEMP outro bridge (the victory/game-over screens replace this in
+    // the next slice): once `finish_battle` parks the fight, end it —
+    // once; the exit transition takes a few ticks and end_battle while
+    // one is running just warns.
+    if battle_finished() && recall("ending") != true {
+        remember("ending", true);
+        ui_close("battle-status");
+        end_battle(battle_result());
+        return;
+    }
+
     ui_window("battle-status", 8.0, 176.0, 192.0, 56.0);
     let folks = battle_participants();
     let row = 8.0;
