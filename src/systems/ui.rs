@@ -189,6 +189,8 @@ pub(crate) fn setup(mut commands: Commands, server: Res<AssetServer>) {
 
 /// A script-declared panel. All children (panel quads, text, bars,
 /// cursor) are rebuilt from requests whenever the window is re-declared.
+/// Bare windows render no panel: their children sit at absolute screen
+/// positions (floating labels).
 #[derive(Component, Clone)]
 pub(crate) struct UiWindow {
     name: String,
@@ -196,6 +198,7 @@ pub(crate) struct UiWindow {
     y: f32,
     w: f32,
     h: f32,
+    bare: bool,
 }
 
 /// An options list within a window; `cursor` points at the finger.
@@ -216,13 +219,28 @@ struct Pending {
     y: f32,
     w: f32,
     h: f32,
+    bare: bool,
     content: Vec<Content>,
 }
 
 enum Content {
-    Text { text: String, x: f32, y: f32 },
-    Options { x: f32, y: f32, labels: Vec<String> },
-    Bar { x: f32, y: f32, w: f32, ratio: f32 },
+    Text {
+        text: String,
+        x: f32,
+        y: f32,
+        color: Option<bevy::color::Color>,
+    },
+    Options {
+        x: f32,
+        y: f32,
+        labels: Vec<String>,
+    },
+    Bar {
+        x: f32,
+        y: f32,
+        w: f32,
+        ratio: f32,
+    },
 }
 
 /// Window-local pixel position (y down) to a child transform offset
@@ -235,7 +253,8 @@ fn layers() -> RenderLayers {
     RenderLayers::layer(UI_LAYER)
 }
 
-/// Spawns the window root with its themed panel quads.
+/// Spawns the window root with its themed panel quads (none for bare
+/// windows — labels sit directly at the absolute position).
 fn spawn_window(commands: &mut Commands, assets: &BubbleAssets, rect: &UiWindow) -> Entity {
     let center = screen_to_world(Vec2::new(rect.x + rect.w / 2.0, rect.y + rect.h / 2.0));
     let root = commands
@@ -245,7 +264,9 @@ fn spawn_window(commands: &mut Commands, assets: &BubbleAssets, rect: &UiWindow)
             Transform::from_translation(center.extend(0.0)),
         ))
         .id();
-    spawn_panel(commands, assets, rect, root);
+    if !rect.bare {
+        spawn_panel(commands, assets, rect, root);
+    }
     root
 }
 
@@ -288,13 +309,13 @@ fn spawn_content(
 ) {
     let layers = layers();
     match content {
-        Content::Text { text, x, y } => {
+        Content::Text { text, x, y, color } => {
             let (text2d, font) = pixel_text(text.clone(), text_assets);
             let row = commands
                 .spawn((
                     text2d,
                     font,
-                    TextColor(theme.text),
+                    TextColor(color.unwrap_or(theme.text)),
                     Anchor::TOP_LEFT,
                     Transform::from_translation(local_offset(rect, *x, *y, Z_TEXT)),
                     layers,
@@ -457,12 +478,46 @@ pub(crate) fn drain(
                         y,
                         w,
                         h,
+                        bare: false,
                         content: Vec::new(),
                     },
                 );
             }
-            UiRequest::Text { window, text, x, y } => match pending.get_mut(&window) {
-                Some(slot) => slot.content.push(Content::Text { text, x, y }),
+            UiRequest::Label {
+                name,
+                text,
+                x,
+                y,
+                color,
+            } => {
+                closes.remove(&name);
+                pending.insert(
+                    name,
+                    Pending {
+                        x,
+                        y,
+                        w: 0.0,
+                        h: 0.0,
+                        bare: true,
+                        content: vec![Content::Text {
+                            text,
+                            x: 0.0,
+                            y: 0.0,
+                            color: Some(bevy::color::Color::srgb(
+                                color[0], color[1], color[2],
+                            )),
+                        }],
+                    },
+                );
+            }
+            UiRequest::Text {
+                window,
+                text,
+                x,
+                y,
+                color,
+            } => match pending.get_mut(&window) {
+                Some(slot) => slot.content.push(Content::Text { text, x, y, color }),
                 None => warn_undeclared(&mut warned, &window),
             },
             UiRequest::Options {
@@ -507,6 +562,7 @@ pub(crate) fn drain(
             y: slot.y,
             w: slot.w,
             h: slot.h,
+            bare: slot.bare,
         };
         let root = match windows.iter().find(|(_, window)| window.name == name) {
             Some((entity, _)) => {
@@ -517,7 +573,10 @@ pub(crate) fn drain(
                     .despawn_children();
                 // despawn_children takes the panel quads with the
                 // content; put the panel back under the fresh content.
-                spawn_panel(&mut commands, &assets, &rect, entity);
+                // Bare windows (labels) have no panel at all.
+                if !rect.bare {
+                    spawn_panel(&mut commands, &assets, &rect, entity);
+                }
                 entity
             }
             None => spawn_window(&mut commands, &assets, &rect),
@@ -698,6 +757,7 @@ mod tests {
             text: "Hello".into(),
             x: 5.0,
             y: 5.0,
+            color: None,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -728,6 +788,7 @@ mod tests {
             text: "Hello".into(),
             x: 5.0,
             y: 5.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
         assert_eq!(window_names(&mut world), vec!["menu".to_owned()]);
@@ -774,6 +835,7 @@ mod tests {
             text: "hi".into(),
             x: 0.0,
             y: 0.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
         assert!(window_names(&mut world).is_empty());
@@ -840,6 +902,7 @@ mod tests {
             text: "hi".into(),
             x: 4.0,
             y: 4.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
 
@@ -857,6 +920,7 @@ mod tests {
             text: "hi".into(),
             x: 4.0,
             y: 4.0,
+            color: None,
         });
         world.run_system_once(drain).unwrap();
 
@@ -911,6 +975,7 @@ mod tests {
             y: 0.0,
             w: GAME_WIDTH as f32,
             h: GAME_HEIGHT as f32,
+            bare: false,
         };
         let assets = world.resource::<BubbleAssets>().clone();
         let mut commands = world.commands();

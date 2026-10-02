@@ -106,6 +106,19 @@ pub enum UiRequest {
         text: String,
         x: f32,
         y: f32,
+        /// Override for the theme's text color (white damage numbers
+        /// over dark bars, colored float labels).
+        color: Option<bevy::color::Color>,
+    },
+    /// Bare colored text at an absolute screen position — no bubble,
+    /// no panel: floating damage numbers and the like. Re-issued per
+    /// tick like windows; a label not re-issued disappears.
+    Label {
+        name: String,
+        text: String,
+        x: f32,
+        y: f32,
+        color: [f32; 3],
     },
     Options {
         window: String,
@@ -470,6 +483,28 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 text: text.to_owned(),
                 x: x as f32,
                 y: y as f32,
+                color: None,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_text",
+        move |window: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Text {
+                window: window.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: Some(bevy::color::Color::srgb(rgb[0], rgb[1], rgb[2])),
             });
         },
     );
@@ -499,6 +534,27 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 ratio: ratio as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_label",
+        move |name: &str, text: &str, x: f64, y: f64, color: rhai::Array| {
+            let channel = |v: &rhai::Dynamic| -> f32 {
+                v.clone().try_cast::<f64>().unwrap_or(1.0) as f32
+            };
+            let rgb = [
+                color.first().map(&channel).unwrap_or(1.0),
+                color.get(1).map(&channel).unwrap_or(1.0),
+                color.get(2).map(&channel).unwrap_or(1.0),
+            ];
+            api.push(UiRequest::Label {
+                name: name.to_owned(),
+                text: text.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                color: rgb,
             });
         },
     );

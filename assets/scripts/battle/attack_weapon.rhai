@@ -41,12 +41,25 @@ fn step_toward(actor, state, target, speed) {
 
 // Floating damage numbers are script-side too: drop an entry in the
 // battle store and the battle UI world script projects and animates it.
-fn float_text(foe, text) {
+// Each entry gets a unique id (its label's name) and a color naming a
+// label color in the HUD ("white" damage, "green" healing).
+fn float_text(foe, text, color) {
+    let next = battle_get("float_id");
+    let next = if next == () { 0 } else { next + 1 };
+    battle_set("float_id", next);
     let floats = battle_get("floats");
     if floats == () {
         floats = [];
     }
-    floats.push(#{text: text, x: foe.x, y: foe.y + 1.4, z: foe.z, age: 0.0});
+    floats.push(#{
+        id: next,
+        text: text,
+        x: foe.x,
+        y: foe.y + 1.4,
+        z: foe.z,
+        age: 0.0,
+        color: color,
+    });
     battle_set("floats", floats);
 }
 
@@ -71,7 +84,7 @@ fn run(actor, state) {
         if crossed(state, strike) {
             let dmg = 12.0;
             battle_bag_set(foe.id, "hp", battle_bag_get(foe.id, "hp") - dmg);
-            float_text(foe, "-" + dmg);
+            float_text(foe, "-" + dmg, "white");
         }
         ()
     } else if state.time < done {

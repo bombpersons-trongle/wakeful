@@ -11,9 +11,10 @@ fn on_update(dt) {
             print("battle over: closing windows");
             ui_close("battle-status");
             ui_close("battle");
-            for n in [0, 1, 2, 3, 4, 5, 6, 7] {
-                ui_close("float" + n);
+            for id in recall("live_floats") {
+                ui_close("float" + id);
             }
+            remember("live_floats", []);
         }
         return;
     }
@@ -37,32 +38,54 @@ fn on_update(dt) {
         ui_text("battle-status", p.id, 8.0, row);
         if p.max_hp != () && p.max_hp > 0 {
             ui_bar("battle-status", 70.0, row + 2.0, 90.0, p.hp / p.max_hp);
+            ui_text("battle-status", "" + p.hp + " / " + p.max_hp, 76.0, row + 2.0, [1.0, 1.0, 1.0]);
         }
         row = row + 14.0;
     }
 
     // Floating damage numbers: entries the battle script pushed into
     // the battle store, rendered at the participant's screen position
-    // and floated up by age. Pure script — the engine only knows how
-    // to project a battle point onto the virtual screen.
+    // and floated up by age. Bare colored labels — no bubble — in the
+    // color the action chose (white damage, green healing). Each float
+    // owns a stable id, so two numbers never share a label, and ids
+    // that age out get their labels closed.
     let floats = battle_get("floats");
+    let live = [];
     if floats != () {
         let kept = [];
-        let i = 0;
         for f in floats {
             let age = f.age + dt;
             if age < 1.2 {
                 let at = battle_screen_pos(f.x, f.y, f.z);
                 if at.onscreen == true {
-                    f.n = i;
-                    ui_window("float" + f.n, at.x - 12.0, at.y - 14.0 - age * 26.0, 34.0, 14.0);
-                    ui_text("float" + f.n, f.text, 4.0, 3.0);
+                    ui_label("float" + f.id, f.text, at.x - 12.0, at.y - 14.0 - age * 26.0,
+                        float_color(f.color));
                 }
                 f.age = age;
                 kept.push(f);
+                live.push(f.id);
             }
-            i = i + 1;
         }
         battle_set("floats", kept);
+    }
+    // Labels whose floats aged out (or left the screen) must be closed
+    // explicitly — a label lives until closed or re-issued.
+    let previous = recall("live_floats");
+    if previous != () {
+        for id in previous {
+            if live.index_of(id) < 0 {
+                ui_close("float" + id);
+            }
+        }
+    }
+    remember("live_floats", live);
+}
+
+// Label colors by name; anything unknown renders white.
+fn float_color(name) {
+    if name == "green" {
+        [0.4, 1.0, 0.4]
+    } else {
+        [1.0, 1.0, 1.0]
     }
 }
