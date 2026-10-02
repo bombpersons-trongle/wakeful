@@ -68,6 +68,10 @@ fn challenge() {
     // the damage lands on the strike beat (see the file's header).
     battle_action_file("attack", "scripts/battle/attack_weapon.rhai");
     battle_action("flee", "flee_action");
+    // The hero fights with the sheet's numbers: the roster owns them
+    // (levels, gear, everything) and the battle bag just mirrors what
+    // the fight needs.
+    let sheet = recall_global("sheets")["hero"];
     start_battle(
         "models/arena.glb",
         #{
@@ -81,7 +85,7 @@ fn challenge() {
                 position: [0.0, 0.0, 3.0],
                 facing: 180.0,
                 brain: "scripts/battle/player_brain.rhai",
-                bag: #{hp: 87.0, max_hp: 100.0},
+                bag: #{hp: sheet.hp, max_hp: sheet.max_hp, quick: sheet.quick},
             },
             #{
                 id: "goblin",
@@ -89,7 +93,7 @@ fn challenge() {
                 position: [0.0, 0.0, -3.0],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 30.0, max_hp: 30.0},
+                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0},
             },
         ],
     );

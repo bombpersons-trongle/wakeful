@@ -9,7 +9,11 @@
 
 fn on_update(dt) {
     // The chibi placeholder from tools/generate_character.py: has the
-    // standard clips, so the player walks, runs, and emotes.
+    // standard clips, so the player walks, runs, and emotes. Ember is
+    // the mage; her sheet lives in the roster (she is menu-only for
+    // now), and the field model matches the hero's until art says
+    // otherwise.
     party_add("hero", "Hero", "models/character.glb");
+    party_add("ember", "Ember", "models/character.glb");
     party_leader("hero");
 }

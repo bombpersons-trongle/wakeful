@@ -104,6 +104,7 @@ mod tests {
     use std::sync::PoisonError;
 
     use super::*;
+    use rhai::Dynamic;
 
     /// A fresh temp folder with the given files, removed on drop so a
     /// failed test doesn't leave junk behind.
@@ -289,6 +290,116 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_roster_script_bootstraps_and_levels_up() {
+        // The character-sheet data layer: three ticks settle the store
+        // (defs, roster, sheets), then XP posted by a battle levels the
+        // hero up along the curve and the derived stats follow.
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
+        let state = crate::world_state::WorldState::default();
+        world.insert_resource(state.clone());
+        let env = crate::scripts::ScriptEnv::new(
+            crate::input::detached(),
+            crate::systems::ui::UiApi::new(),
+            state.clone(),
+            crate::battle::BattleHandle::new(),
+        );
+        let runtime = WorldScriptRuntime::compile_with_handle(
+            include_str!("../../assets/scripts/world/roster.rhai"),
+            env,
+        )
+        .expect("the shipped roster script must compile");
+        let script_entity = world
+            .spawn((WorldScript {
+                path: "scripts/world/roster.rhai".into(),
+                runtime,
+                scope: Scope::new(),
+            },))
+            .id();
+
+        world.run_system_once(run_world_scripts).unwrap();
+        assert!(
+            world.get::<ScriptBroken>(script_entity).is_none(),
+            "the roster script must not error on its ticks"
+        );
+        world.run_system_once(run_world_scripts).unwrap();
+        assert!(
+            world.get::<ScriptBroken>(script_entity).is_none(),
+            "the roster script must keep running"
+        );
+
+        let sheet_of = |shared: &crate::world_state::WorldState, id: &str| -> rhai::Map {
+            shared
+                .shared()
+                .lock()
+                .unwrap()
+                .get("sheets")
+                .and_then(|v| v.clone().try_cast::<rhai::Map>())
+                .and_then(|sheets| sheets.get(id).cloned())
+                .and_then(|v| v.try_cast::<rhai::Map>())
+                .expect("the sheet must exist")
+        };
+        let num = |sheet: &rhai::Map, key: &str| -> f64 {
+            sheet
+                .get(key)
+                .and_then(|v| v.as_float().ok())
+                .unwrap()
+        };
+
+        let hero = sheet_of(&state, "hero");
+        assert_eq!(
+            hero.get("level").and_then(|v| v.as_int().ok()),
+            Some(1)
+        );
+        // Base fighter str 10 + the rusty knife's 2.
+        assert!((num(&hero, "str") - 12.0).abs() < 1e-6);
+        assert!((num(&hero, "max_hp") - 60.0).abs() < 1e-6);
+
+        let ember = sheet_of(&state, "ember");
+        assert_eq!(ember.get("spells").is_some(), true, "the mage owns spells");
+
+        // A battle posts 50 xp: level 2 (25 needed) with 25 left over,
+        // and the derived strength picks up the level's growth.
+        let entry = rhai::Map::from_iter([
+            ("id".into(), Dynamic::from("hero")),
+            ("amount".into(), Dynamic::from(50.0_f64)),
+        ]);
+        state
+            .shared()
+            .lock()
+            .unwrap()
+            .insert(
+                "xp_pending".into(),
+                Dynamic::from(vec![Dynamic::from(entry)]),
+            );
+        world.run_system_once(run_world_scripts).unwrap();
+
+        // TEMP: why didn't the level land?
+        {
+            let shared = state.shared();
+            let guard = shared.lock().unwrap();
+            eprintln!(
+                "POST-XP pending = {:?} hero = {:?} broken = {:?}",
+                guard.get("xp_pending"),
+                guard
+                    .get("sheets")
+                    .and_then(|v| v.clone().try_cast::<rhai::Map>())
+                    .and_then(|s| s.get("hero").cloned()),
+                world.get::<ScriptBroken>(script_entity).is_some(),
+            );
+        }
+
+        let hero = sheet_of(&state, "hero");
+        assert_eq!(
+            hero.get("level").and_then(|v| v.as_int().ok()),
+            Some(2)
+        );
+        assert!((num(&hero, "xp") - 25.0).abs() < 1e-6, "leftover xp kept");
+        assert!((num(&hero, "str") - 14.0).abs() < 1e-6, "growth applied");
+    }
+
+    #[test]
     fn the_shipped_party_script_populates_the_roster() {
         // Guards against the script erroring on its first tick (which
         // would silently disable it and leave the capsule on the field).
@@ -333,3 +444,5 @@ mod tests {
         world.run_system_once(run_world_scripts).unwrap();
     }
 }
+
+
