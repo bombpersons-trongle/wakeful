@@ -71,7 +71,83 @@ fn assert_valid_model(name: &str, bytes: &[u8]) -> (gltf::Document, Vec<gltf::bu
 const RIG_JOINTS: [&str; 8] = [
     "hips", "torso", "head", "hair", "arm_l", "arm_r", "leg_l", "leg_r",
 ];
-const CLIPS: [&str; 6] = ["idle", "walk", "run", "pick_up", "shrug", "wave"];
+const CLIPS: [&str; 8] = [
+    "idle", "walk", "run", "pick_up", "shrug", "wave", "attack", "die",
+];
+
+/// The goblin ships the same rig and clip set as the hero — the battle
+/// flow drives both through the same clips (attack, die).
+#[test]
+fn the_generated_goblin_model_matches_the_hero_rig() {
+    let (document, buffers) = assert_valid_model(
+        "goblin.glb",
+        include_bytes!("../assets/models/goblin.glb"),
+    );
+    let names: HashSet<&str> = document.nodes().filter_map(|n| n.name()).collect();
+    for joint in RIG_JOINTS {
+        assert!(names.contains(joint), "goblin rig is missing '{joint}'");
+    }
+    let animation_names: HashSet<&str> = document.animations().filter_map(|a| a.name()).collect();
+    for clip in CLIPS {
+        assert!(animation_names.contains(clip), "goblin is missing '{clip}'");
+    }
+}
+
+#[test]
+fn the_attack_clip_sells_a_swing() {
+    let (document, buffers) = assert_valid_model(
+        "character.glb",
+        include_bytes!("../assets/models/character.glb"),
+    );
+    let attack = document
+        .animations()
+        .find(|a| a.name() == Some("attack"))
+        .expect("attack clip");
+    assert!(
+        clip_moves_a_joint(&document, &buffers, &attack),
+        "attack must animate; a constant clip plays as one frame"
+    );
+}
+/// `die` is the battle flow's death animation: it must END with the
+/// body sunk below the floor (hips translated down), and it must not
+/// touch scale — a scale-0 death would stick after the clip stops
+/// applying, because nothing else animates scale.
+#[test]
+fn the_die_clip_ends_buried() {
+    let (document, buffers) = assert_valid_model(
+        "character.glb",
+        include_bytes!("../assets/models/character.glb"),
+    );
+    let die = document
+        .animations()
+        .find(|a| a.name() == Some("die"))
+        .expect("die clip");
+    let mut saw_translation = false;
+    for channel in die.channels() {
+        let node = channel.target().node().name();
+        match channel.target().property() {
+            gltf::animation::Property::Scale => {
+                panic!("die must not animate scale; a stale scale sticks after the clip")
+            }
+            gltf::animation::Property::Translation => {
+                assert_eq!(node, Some("hips"), "die sinks via the hips joint");
+                let reader =
+                    channel.reader(|buffer| buffers.get(buffer.index()).map(|data| &data[..]));
+                let ys = match reader.read_outputs().expect("translation outputs") {
+                    gltf::animation::util::ReadOutputs::Translations(t) => {
+                        t.map(|v| v[1]).collect::<Vec<f32>>()
+                    }
+                    _ => panic!("expected translations"),
+                };
+                assert!(*ys.last().expect("keyframes") < -1.2, "die must end buried");
+                assert!(ys[0] > -0.1, "die must start standing");
+                saw_translation = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_translation, "die must sink (a hips translation)");
+}
 
 #[test]
 fn the_generated_character_model_is_a_valid_rigged_gltf() {

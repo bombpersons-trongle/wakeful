@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Generates assets/models/character.glb: the chibi placeholder character.
+"""Generates the chibi placeholder character models in assets/models/:
+character.glb (the hero) and goblin.glb (a green palette variant).
 
 Blocky FF7-field-model proportions (~2.7 heads tall), rigid limbs animated
 with node TRS channels — no skinning. This file is the reference for the
@@ -8,7 +9,8 @@ node names and clip set so the engine drives them identically:
 
     joints: hips torso head hair arm_l arm_r leg_l leg_r
     clips:  idle walk run        (looped by the engine)
-            pick_up shrug wave   (one-shots)
+            pick_up shrug wave attack   (one-shots)
+            die                (one-shot; sinks the body under the floor)
 
 Usage: python3 tools/generate_character.py  (from the repo root)
 """
@@ -18,7 +20,7 @@ import math
 import os
 import struct
 
-OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "models", "character.glb")
+OUT = os.path.join(os.path.dirname(__file__), "..", "assets", "models")
 
 from gltf import box, clip_loop, clip_oneshot, eased, quat_from_euler, Writer
 
@@ -33,14 +35,20 @@ SHIRT = "shirt"
 PANTS = "pants"
 BOOTS = "boots"
 
-# (node name, parent, translation, [(mesh size, mesh center, material)])
-
-MATERIAL_COLORS = {
+# (material name -> rgb) per model: same rig, different paint.
+CHARACTER_PALETTE = {
     SKIN: (0.98, 0.80, 0.65),
     HAIR: (0.22, 0.13, 0.08),
     SHIRT: (0.20, 0.55, 0.55),
     PANTS: (0.35, 0.30, 0.45),
     BOOTS: (0.20, 0.20, 0.25),
+}
+GOBLIN_PALETTE = {
+    SKIN: (0.38, 0.58, 0.26),
+    HAIR: (0.24, 0.34, 0.16),
+    SHIRT: (0.45, 0.38, 0.26),
+    PANTS: (0.28, 0.26, 0.22),
+    BOOTS: (0.16, 0.15, 0.12),
 }
 
 PARTS = [
@@ -128,33 +136,72 @@ def wave(t):
     }
 C["wave"] = clip_oneshot(1.5, 60, wave)
 
+# One envelope per euler axis. A big overhead slash: arm coils up
+# behind the head, sweeps down through the front, settles. Composing
+# multiple envelopes on one axis fights itself; one chain reads clean.
+def attack(t):
+    return {
+        # coil up overhead, then a full downward arc
+        "arm_r": {"r": (
+            eased([(0.0, 0.0), (0.3, -150), (0.4, -150), (0.65, 80), (0.9, 0.0)], t) * DEG,
+            0,
+            -10 * DEG * math.sin(math.pi * min(t / 0.9, 1.0)),
+        )},
+        "torso": {"r": (
+            eased([(0.0, 0.0), (0.3, -12), (0.4, -12), (0.65, 18), (0.9, 0.0)], t) * DEG,
+            eased([(0.0, 0.0), (0.3, -35), (0.65, 40), (0.9, 0.0)], t) * DEG,
+            0,
+        )},
+        "arm_l": {"r": (eased([(0.0, 0.0), (0.35, -40), (0.7, 0.0)], t) * DEG, 0, 0)},
+        "head": {"r": (eased([(0.0, 0.0), (0.3, -18), (0.65, 8), (0.9, 0.0)], t) * DEG, 0, 0)},
+        "hips": {"t": (0, eased([(0.0, 0.0), (0.3, 0.02), (0.65, -0.02), (0.9, 0.0)], t), 0)},
+    }
+C["attack"] = clip_oneshot(0.9, 54, attack)
 
-def main():
+# Death reads as sinking into the ground: the hips translate down
+# until the whole body is below the floor, and the clip HOLDS there.
+# Two constraints shaped this:
+#   - the glTF root belongs to the engine's transform sync, so the
+#     clip drives the hips joint, never the root;
+#   - a bevy animation only rewrites the properties its curves target,
+#     so the die must NOT use scale — idle and the rest animate hips
+#     translation, which resurrects the body when they resume. A
+#     scale-to-zero death would leave a stale scale-0 forever after.
+# (glTF cannot animate material opacity, so a true fade is out.)
+def die(t):
+    sink = eased([(0.0, 0.0), (0.12, 0.03), (0.25, -0.08), (0.8, -1.55)], t)
+    return {
+        "hips": {"t": (0, sink, 0)},
+    }
+C["die"] = clip_oneshot(1.4, 56, die)
+
+
+def build(filename, name, palette):
     w = Writer()
-    material_index = {name: w.add_material(name, rgb) for name, rgb in MATERIAL_COLORS.items()}
+    material_index = {material: w.add_material(material, rgb) for material, rgb in palette.items()}
 
     node_index = {}
-    for name, parent, translation, boxes in PARTS:
-        node = {"name": name, "translation": list(translation)}
+    for joint, parent, translation, boxes in PARTS:
+        node = {"name": joint, "translation": list(translation)}
         if boxes:
             meshes = [box(size, center) for size, center, _ in boxes]
             materials = [material_index[material] for _, _, material in boxes]
-            node["mesh"] = w.add_mesh(name, meshes, materials)
-        node_index[name] = len(w.nodes)
+            node["mesh"] = w.add_mesh(joint, meshes, materials)
+        node_index[joint] = len(w.nodes)
         w.nodes.append(node)
-    for name, parent, _, _ in PARTS:
+    for joint, parent, _, _ in PARTS:
         if parent is not None:
-            w.nodes[node_index[parent]].setdefault("children", []).append(node_index[name])
+            w.nodes[node_index[parent]].setdefault("children", []).append(node_index[joint])
 
     animations = [
-        w.add_animation(name, duration, frames, node_index)
-        for name, (duration, frames) in C.items()
+        w.add_animation(clip, duration, frames, node_index)
+        for clip, (duration, frames) in C.items()
     ]
 
     gltf = {
         "asset": {"version": "2.0", "generator": "wakeful tools/generate_character.py"},
         "scene": 0,
-        "scenes": [{"name": "character", "nodes": [node_index["character"]]}],
+        "scenes": [{"name": name, "nodes": [node_index["character"]]}],
         "nodes": w.nodes,
         "meshes": w.meshes,
         "materials": w.materials,
@@ -163,11 +210,17 @@ def main():
         "bufferViews": w.views,
         "accessors": w.accessors,
     }
-    os.makedirs(os.path.dirname(OUT), exist_ok=True)
-    with open(OUT, "wb") as f:
+    path = os.path.join(OUT, filename)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as f:
         f.write(w.glb(gltf))
     clips = ", ".join(sorted(C))
-    print(f"wrote {os.path.normpath(OUT)} ({len(w.bin)} byte buffer, clips: {clips})")
+    print(f"wrote {os.path.normpath(path)} ({len(w.bin)} byte buffer, clips: {clips})")
+
+
+def main():
+    build("character.glb", "character", CHARACTER_PALETTE)
+    build("goblin.glb", "goblin", GOBLIN_PALETTE)
 
 
 if __name__ == "__main__":
