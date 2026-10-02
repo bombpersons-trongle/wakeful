@@ -1,12 +1,12 @@
-// The battle free-camera: a flight mode for checking the arena and the
-// fighters from any angle. Tap select to toggle it; while it is on the
-// d-pad looks (left/right yaw, up/down pitch) and cross/circle fly
-// forward/back. Off by default, so the battle menu owns the same
-// buttons normally.
+// The free-camera: a flight mode for checking a scene (or a battle) from
+// any angle — the painted background becomes a depth card today, and
+// flying around it is the way to see the card's actual geometry. Toggle
+// with select; while it is on the d-pad looks (left/right yaw, up/down
+// pitch) and cross/circle fly forward/back. Off by default, so the
+// battle menu owns the same buttons normally.
 //
-// Deltas go to the engine as a request each tick; the sequencer
-// republishes the camera snapshot from the moved transform, so script
-// projections (floating damage) stay truthful while flying.
+// The moves apply to whichever 3D camera is active — one script covers
+// the scene and the battle flight alike.
 //
 // (Speeds live inside on_update: rhai functions do not see top-level
 // constants.)
@@ -44,7 +44,7 @@ fn on_update(dt) {
         dolly -= fly * dt;
     }
     if yaw != 0.0 || pitch != 0.0 || dolly != 0.0 {
-        battle_camera_move(yaw, pitch, dolly);
+        camera_move(yaw, pitch, dolly);
     }
     ()
 }

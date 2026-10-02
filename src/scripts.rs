@@ -1551,13 +1551,13 @@ mod tests {
     }
 
     #[test]
-    fn the_shipped_battle_camera_script_flies_when_toggled() {
+    fn the_shipped_free_camera_script_flies_when_toggled() {
         use crate::input::PadButton;
 
         let input = crate::input::detached();
         let battle = crate::battle::BattleHandle::new();
         let text = std::fs::read_to_string(
-            crate::assets::assets_root().join("scripts/world/battle_camera.rhai"),
+            crate::assets::assets_root().join("scripts/world/free_camera.rhai"),
         )
         .expect("the shipped camera script is on disk");
         let script = WorldScript::compile_with_handle(
@@ -1578,7 +1578,7 @@ mod tests {
 
         // Select taps the mode on; a held d-pad looks. The shipped
         // script also exercises the world tier's registration of
-        // battle_camera_move, so this catches a missing tier.
+        // camera_move, so this catches a missing tier.
         input.lock().unwrap().inject(
             &[PadButton::Select, PadButton::DPadLeft],
             &[PadButton::Select],

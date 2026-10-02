@@ -21,7 +21,7 @@ use crate::game_state::GameState;
 use crate::input::InputManager;
 use crate::transition::{Effect, TransitionState};
 use crate::systems::animation::Locomotion;
-use crate::systems::camera::BattleCamera;
+use crate::systems::camera::{BattleCamera, SceneCamera};
 use crate::world_state::WorldState;
 
 use crate::systems::actor::ActorModel;
@@ -452,7 +452,7 @@ pub(crate) fn register_battle_api(
     {
         let battle = battle.clone();
         engine.register_fn(
-            "battle_camera_move",
+            "camera_move",
             move |yaw: f64, pitch: f64, dolly: f64| {
                 battle.push(BattleRequest::CameraMove {
                     yaw: yaw as f32,
@@ -579,7 +579,7 @@ pub(crate) fn battle_requests(
     mut transition: ResMut<TransitionState>,
     mut pending: ResMut<PendingBattleStart>,
     mut emote_targets: Query<&mut EmoteRequest>,
-    mut cameras: Query<&mut Transform, With<BattleCamera>>,
+    mut cameras: Query<(&mut Transform, &Camera), Or<(With<SceneCamera>, With<BattleCamera>)>>,
 ) {
     let mut end: Option<String> = None;
     for request in battle.take_requests() {
@@ -625,17 +625,20 @@ pub(crate) fn battle_requests(
                 dolly,
             } => {
                 // The free-camera flight: rotate, then slide along the
-                // new look direction. The sequencer republishes the
+                // new look direction — of whichever view is active,
+                // scene or battle alike. The sequencer republishes the
                 // camera snapshot from this transform every tick, so
                 // script projections stay truthful while flying.
-                if battle_state.is_some()
-                    && let Ok(mut transform) = cameras.single_mut()
-                {
+                for (mut transform, camera) in cameras.iter_mut() {
+                    if !camera.is_active {
+                        continue;
+                    }
                     let (yaw_now, pitch_now, _) =
                         transform.rotation.to_euler(EulerRot::YXZ);
                     let yaw = yaw_now + dyaw;
                     let pitch = (pitch_now + dpitch).clamp(-1.5, 1.5);
-                    transform.rotation = Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
+                    transform.rotation =
+                        Quat::from_euler(EulerRot::YXZ, yaw, pitch, 0.0);
                     let slide = transform.forward() * dolly;
                     transform.translation += slide;
                 }
@@ -1088,7 +1091,7 @@ mod tests {
     }
 
     #[test]
-    fn the_camera_flight_moves_the_transform_only_while_a_battle_runs() {
+    fn the_camera_flight_moves_the_active_camera() {
         use bevy::ecs::system::RunSystemOnce;
 
         let mut world = World::new();
@@ -1098,18 +1101,43 @@ mod tests {
         world.init_resource::<PendingBattleStart>();
         world.spawn((
             BattleCamera,
+            Camera {
+                is_active: true,
+                ..default()
+            },
             Transform::from_xyz(10.0, 9.0, 10.0).looking_at(Vec3::new(0.0, 0.5, 0.0), Vec3::Y),
+            Projection::default(),
+        ));
+        // The scene camera shares the sequencer's query; inactive, so the
+        // flight must leave it alone.
+        world.spawn((
+            crate::systems::camera::SceneCamera,
+            Camera {
+                is_active: false,
+                ..default()
+            },
+            Transform::from_xyz(0.0, 6.0, 9.0),
             Projection::default(),
         ));
         let pose = |world: &mut World| {
             *world
-                .query::<&Transform>()
+                .query::<(&BattleCamera, &Transform)>()
                 .single(world)
                 .expect("the harness spawns the battle camera")
+                .1
+        };
+        let scene_pose = |world: &mut World| {
+            *world
+                .query::<(&crate::systems::camera::SceneCamera, &Transform)>()
+                .single(world)
+                .expect("the harness spawns the scene camera")
+                .1
         };
         let original = pose(&mut world);
 
-        // No battle: the request is dropped, the camera stays put.
+        // No battle: the flight still applies — it is the free camera,
+        // not battle-scoped. It turns the camera half a radian and
+        // slides it exactly one unit along the (new) look direction.
         world
             .resource_mut::<BattleHandle>()
             .push(BattleRequest::CameraMove {
@@ -1119,10 +1147,10 @@ mod tests {
             });
         world.run_system_once(battle_requests).unwrap();
         let idle = pose(&mut world);
-        assert_eq!(idle, original);
+        assert_ne!(idle, original);
+        let scene_original = scene_pose(&mut world);
 
-        // A live battle: the flight turns the camera half a radian and
-        // slides it exactly one unit along the (new) look direction.
+        // A live battle: same treatment for the (still active) camera.
         world.insert_resource(Battle {
             arena: Entity::PLACEHOLDER,
             participants: vec![],
@@ -1143,6 +1171,8 @@ mod tests {
         let (yaw_before, _, _) = idle.rotation.to_euler(EulerRot::YXZ);
         assert!((yaw - yaw_before - 0.5).abs() < 1e-4);
         assert!((flown.translation - idle.translation).length() - 1.0 < 1e-4);
+        // The inactive scene camera never flew.
+        assert_eq!(scene_pose(&mut world), scene_original);
     }
 
     #[test]
