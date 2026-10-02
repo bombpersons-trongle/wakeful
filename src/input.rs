@@ -475,15 +475,18 @@ impl InputState {
         filtered
     }
 
-    /// Name-based lookups for the script API; `None` is an unknown name.
+    /// Name-based lookups for tests; `None` is an unknown name.
+    #[cfg(test)]
     pub fn pressed_by_name(&self, name: &str) -> Option<bool> {
         Some(self.pressed(PadButton::from_config(name)?))
     }
 
+    #[cfg(test)]
     pub fn just_pressed_by_name(&self, name: &str) -> Option<bool> {
         Some(self.just_pressed(PadButton::from_config(name)?))
     }
 
+    #[cfg(test)]
     pub fn just_released_by_name(&self, name: &str) -> Option<bool> {
         Some(self.just_released(PadButton::from_config(name)?))
     }

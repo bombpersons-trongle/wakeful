@@ -26,6 +26,12 @@ pub struct Scene {
     /// meters. Only meaningful alongside `depth_map`.
     #[serde(default = "default_depth_range")]
     pub depth_range: f32,
+    /// The background plate is bigger than the game's 320x240 view: the
+    /// view is a window onto it that follows the player, clamping at the
+    /// plate's edges. `None` (the default) pins the view to the plate
+    /// exactly.
+    #[serde(default)]
+    pub pan: Option<PanSpec>,
     pub camera: CameraPose,
     pub walkable: Option<WalkableGrid>,
     /// Trigger rects that load another scene when the player touches one.
@@ -46,6 +52,26 @@ pub struct Scene {
 
 fn default_depth_range() -> f32 {
     32.0
+}
+
+/// The background pans: rendered as a `plate`, shown through a smaller
+/// `window` (normally the game's 320x240) that slides after the player.
+/// Both aspects must be 4:3 — the window is a clean crop of the plate.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
+pub struct PanSpec {
+    pub plate: (u32, u32),
+    pub window: (u32, u32),
+}
+
+impl PanSpec {
+    /// The window's travel range: how far its top-left corner may slide
+    /// inside the plate.
+    pub fn travel(&self) -> (f32, f32) {
+        (
+            (self.plate.0.saturating_sub(self.window.0)) as f32,
+            (self.plate.1.saturating_sub(self.window.1)) as f32,
+        )
+    }
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
@@ -390,6 +416,24 @@ mod tests {
         let grid = scene.walkable.unwrap();
         assert!(grid.is_walkable(-1.5, -1.5));
         assert!(!grid.is_walkable(-0.5, -1.5));
+        // The pan spec is optional: absent means the view is pinned.
+        assert_eq!(scene.pan, None);
+    }
+
+    #[test]
+    fn parses_the_pan_spec() {
+        let src = r#"(
+            background: Some("backgrounds/room1.png"),
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            pan: Some((plate: (640, 480), window: (320, 240))),
+        )"#;
+        let scene: Scene = ron::from_str(src).unwrap();
+        let pan = scene.pan.expect("the pan spec parses");
+        assert_eq!(pan, crate::scene::PanSpec {
+            plate: (640, 480),
+            window: (320, 240),
+        });
+        assert_eq!(pan.travel(), (320.0, 240.0));
     }
 
     #[test]
@@ -449,6 +493,7 @@ mod tests {
             }],
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: Vec::new(),
         };
@@ -687,6 +732,7 @@ mod tests {
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: Vec::new(),
         }

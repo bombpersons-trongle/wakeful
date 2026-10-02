@@ -186,9 +186,14 @@ def ron_float(v):
     return repr(round(float(v), 5))
 
 
-def scene_ron(origin, target, fov, name, depth_range):
+def scene_ron(origin, target, fov, name, depth_range, pan=None):
     pos = ", ".join(ron_float(c) for c in origin)
     look = ", ".join(ron_float(c) for c in target)
+    pan_line = (
+        f"    pan: Some((plate: ({pan[0]}, {pan[1]}), window: (320, 240))),\n"
+        if pan is not None
+        else ""
+    )
     return f"""(
     camera: (
         position: ({pos}),
@@ -199,7 +204,7 @@ def scene_ron(origin, target, fov, name, depth_range):
     background: Some("backgrounds/{name}.png"),
     depth_map: Some("backgrounds/{name}_depth.png"),
     depth_range: {ron_float(depth_range)},
-    teleporters: [],
+{pan_line}    teleporters: [],
     actors: [],
 )
 """
@@ -236,7 +241,16 @@ def main():
     _, fov = plate_fovs(camera, plate)
     scene_path = f"assets/scenes/{name}.scene"
     with open(scene_path, "w") as fh:
-        fh.write(scene_ron(origin, target, fov, name, depth_range))
+        fh.write(
+            scene_ron(
+                origin,
+                target,
+                fov,
+                name,
+                depth_range,
+                pan=plate if plate != WINDOW else None,
+            )
+        )
     print(f"[generate_scene] wrote {scene_path}")
     print(
         "[generate_scene] camera pose: position="

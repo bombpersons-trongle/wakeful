@@ -1,6 +1,7 @@
 //! Scene loading and application: the systems that turn a loaded
 //! `assets/scenes/*.scene` file into live entities and resources.
 
+use bevy::camera::SubCameraView;
 use bevy::prelude::*;
 use rhai::Scope;
 
@@ -138,7 +139,7 @@ pub fn apply_scene(
         return;
     };
 
-    let Ok((mut transform, mut projection)) = cameras.single_mut() else {
+    let Ok((mut transform, mut projection, mut camera)) = cameras.single_mut() else {
         return;
     };
     *transform = Transform::from_translation(scene.camera.position.into())
@@ -147,6 +148,15 @@ pub fn apply_scene(
         fov: scene.camera.fov_degrees.to_radians(),
         aspect_ratio: screen::GAME_WIDTH as f32 / screen::GAME_HEIGHT as f32,
         ..default()
+    });
+    // A panning scene shows a window of the bigger plate; the depth card
+    // was baked through this same fov, so the full view reproduces the
+    // plate exactly and the sub view is a pure crop of it. Without a pan
+    // spec any stale sub view from the previous scene must go.
+    camera.sub_camera_view = scene.pan.map(|pan| SubCameraView {
+        full_size: UVec2::new(pan.plate.0, pan.plate.1),
+        offset: Vec2::new(pan.travel().0 / 2.0, pan.travel().1 / 2.0),
+        size: UVec2::new(pan.window.0, pan.window.1),
     });
 
     // The background is real geometry: a depth card in the scene
@@ -390,6 +400,7 @@ mod tests {
             teleporters: Vec::new(),
             depth_map: depth_map.map(str::to_string),
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: Vec::new(),
         }
@@ -463,6 +474,8 @@ mod tests {
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
+        let mut images = Assets::<Image>::default();
+        server.register_asset(&images);
         world.insert_resource(server);
         world.insert_resource(crate::systems::ui::UiApi::new());
         let handle = assets.add(test_scene(
@@ -526,6 +539,7 @@ mod tests {
             }],
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: Vec::new(),
         }
@@ -543,10 +557,11 @@ mod tests {
         let server = test_asset_server();
         let mut assets = Assets::<Scene>::default();
         server.register_asset(&assets);
+        let mut images = Assets::<Image>::default();
+        server.register_asset(&images);
         world.insert_resource(server);
         let handle = assets.add(scene);
         world.insert_resource(assets);
-        let mut images = Assets::<Image>::default();
         world.insert_resource(screen::GameImage(images.add(Image::default())));
         world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(Assets::<StandardMaterial>::default());
@@ -558,7 +573,12 @@ mod tests {
         if let Some(at) = player_spawn {
             world.insert_resource(PlayerSpawn(at));
         }
-        world.spawn((GameCamera, Transform::default(), Projection::default()));
+        world.spawn((
+            GameCamera,
+            Camera::default(),
+            Transform::default(),
+            Projection::default(),
+        ));
         world
     }
 
@@ -618,6 +638,43 @@ mod tests {
         let mut players = world.query_filtered::<&Transform, With<Player>>();
         let transform = players.single(&world).unwrap();
         assert_eq!(transform.translation.xz(), Vec2::ZERO);
+    }
+
+    /// A panning scene shows a window onto the bigger plate: the camera
+    /// grows a sub view, centered. A scene without a pan spec clears any
+    /// sub view left over from the previous scene.
+    #[test]
+    fn apply_scene_wires_the_pan_window() {
+        let mut scene = test_scene(
+            Some("backgrounds/room.png"),
+            Some("backgrounds/room_depth.png"),
+        );
+        scene.pan = Some(crate::scene::PanSpec {
+            plate: (640, 480),
+            window: (320, 240),
+        });
+        let mut world = world_for_apply(scene, None);
+        world.run_system_once(apply_scene).unwrap();
+        world.flush();
+        let mut cameras = world.query_filtered::<&Camera, With<GameCamera>>();
+        let sub = cameras.single(&world).unwrap().sub_camera_view.clone();
+        let sub = sub.expect("a panning scene shows a window");
+        assert_eq!(sub.full_size, UVec2::new(640, 480));
+        assert_eq!(sub.size, UVec2::new(320, 240));
+        assert_eq!(sub.offset, Vec2::new(160.0, 120.0), "window starts centered");
+
+        // Re-applying a card-less, pan-less scene clears the window.
+        let mut world = world_for_apply(test_scene(None, None), None);
+        let mut cameras = world.query_filtered::<&mut Camera, With<GameCamera>>();
+        cameras.single_mut(&mut world).unwrap().sub_camera_view = Some(SubCameraView {
+            full_size: UVec2::new(640, 480),
+            offset: Vec2::new(10.0, 10.0),
+            size: UVec2::new(320, 240),
+        });
+        world.run_system_once(apply_scene).unwrap();
+        world.flush();
+        let mut cameras = world.query_filtered::<&Camera, With<GameCamera>>();
+        assert!(cameras.single(&world).unwrap().sub_camera_view.is_none());
     }
 
     #[test]

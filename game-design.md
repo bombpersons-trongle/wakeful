@@ -23,20 +23,23 @@ chests that stay open because you opened them.
   subtle CRT-style dither over that image.
 - Type is a pixel bitmap font (Pixel Operator), drawn at pixel scale
   to match the 16-bit look.
-- Devroom's backgrounds are real photographs — standing in for the
-  painted background art a production would commission. Each background
-  ships with a depth map, and the engine turns the pair into a depth
-  card: real geometry in the scene camera's pass, so characters and
-  background occlude each other correctly (step behind an awning and it
-  covers you). The ground grid in each scene tells the engine where the
-  player may walk, matching the fixed-camera staging of the genre.
+- Devroom's room is authored in Blender (raw_assets/): the background
+  renders out with a depth map, and the engine turns the pair into a
+  depth card — real geometry in the scene camera's pass, so characters
+  and background occlude each other correctly (step behind an awning
+  and it covers you). Rendered bigger than the screen, the room pans:
+  the view is a window onto the plate that follows the player. The
+  ground grid in each scene tells the engine where the player may walk,
+  matching the fixed-camera staging of the genre.
 
 ## Camera and movement
 
 - Each scene [owns a fixed camera](assets/scenes/devroom.scene): a pose
-  (position, target, field of view) chosen for the room. Walking between
-  scenes keeps the model consistent and stages the new room with its
-  own camera.
+  (position, target, field of view) chosen for the room. Rooms whose
+  background was rendered bigger than the screen pan: the view is a
+  320×240 window onto the plate that follows the player and stops at
+  the plate's edges. Walking between scenes keeps the model consistent
+  and stages the new room with its own camera.
 - The player is a chibi character (about 2.7 heads tall) on a
   walkable grid; fine steps follow the
   grid so movement reads crisply against the background while staying

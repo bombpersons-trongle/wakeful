@@ -1,8 +1,8 @@
 (
     camera: (
-        position: (0.0, 6.0, 9.0),
-        target: (0.0, 0.0, 0.0),
-        fov_degrees: 45.0,
+        position: (2.9955, 3.20457, 6.51585),
+        target: (-1.09468, 0.56379, -2.21895),
+        fov_degrees: 49.92558,
     ),
     walkable: Some((
         origin: (-2.5, -2.5),
@@ -19,12 +19,14 @@
             true, true, true, true, false,
         ],
     )),
-    background: Some("backgrounds/carlisle.png"),
-    // Synthetic placeholder depth (tools/generate_test_depth.py) until
-    // the Blender exporter authors the real one: the walkable floor plus
-    // a foreground slab at 10m to prove both occlusion directions.
+    background: Some("backgrounds/devroom.png"),
+    // A Blender-authored plate (raw_assets/scenes/village_1.blend, via
+    // tools/generate_scene.py at 640x480): the room renders bigger than
+    // the screen and pans — the view is a window onto the plate that
+    // follows the player.
     depth_map: Some("backgrounds/devroom_depth.png"),
-    depth_range: 32.0,
+    depth_range: 19.0,
+    pan: Some((plate: (640, 480), window: (320, 240))),
     // Actors: the goblin trails the player and counts your meetings;
     // the two chests share one script but carry their own identity
     // (private memory) and contents (params.item).

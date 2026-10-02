@@ -139,6 +139,7 @@ mod tests {
             }],
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: Vec::new(),
         }

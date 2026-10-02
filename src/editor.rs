@@ -185,7 +185,7 @@ fn sync_camera(
     let Some(scene) = current.as_ref().and_then(|c| scenes.get(&c.handle)) else {
         return;
     };
-    let Ok((mut transform, mut projection)) = cameras.single_mut() else {
+    let Ok((mut transform, mut projection, _)) = cameras.single_mut() else {
         return;
     };
     *transform = Transform::from_translation(scene.camera.position.into())

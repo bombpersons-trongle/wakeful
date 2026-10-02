@@ -14,7 +14,7 @@ use crate::scripts::{ActorScript, Said, ScriptBroken};
 use crate::systems::animation::{EmoteRequest, Locomotion, PendingAnimations};
 use crate::systems::bubble::{self, BubbleTheme};
 use crate::systems::party::Party;
-use crate::systems::scene::gltf_asset_path;
+use crate::systems::scene::{SceneGraphics, gltf_asset_path};
 use crate::text::TextAssets;
 
 /// How long a scripted line stays up before closing itself.
@@ -353,6 +353,47 @@ fn say(
     actor.said = Some(said.clone());
 }
 
+/// Keeps anchored bubbles glued to their speaker. The bubble was placed
+/// once at say-time; this re-projects the actor's position every frame
+/// so the bubble rides along with the actor's image — including the
+/// camera pan, whose sub view `world_to_viewport` already accounts for.
+/// Free-placed bubbles are the script's business and stay where they
+/// were put.
+pub(crate) fn track_anchored_bubbles(
+    graphics: Option<Res<SceneGraphics>>,
+    roots: Query<&GlobalTransform>,
+    actors: Query<(&Actor, &Transform), Without<bubble::SpeechBubble>>,
+    mut bubbles: Query<&mut Transform, With<bubble::SpeechBubble>>,
+    camera: Query<(&Camera, &GlobalTransform), With<GameCamera>>,
+) {
+    let Ok((camera, camera_transform)) = camera.single() else {
+        return;
+    };
+    let root = match graphics {
+        Some(graphics) => roots.get(graphics.0).ok(),
+        None => None,
+    };
+    for (actor, transform) in &actors {
+        let Some(entity) = actor.bubble else {
+            continue;
+        };
+        if actor.said.as_ref().is_some_and(|said| said.at.is_some()) {
+            continue;
+        }
+        let Some(root) = root else {
+            continue;
+        };
+        let world = root.transform_point(transform.translation);
+        let Ok(at) = camera.world_to_viewport(camera_transform, world) else {
+            continue;
+        };
+        let at = at - Vec2::Y * SAY_HEADROOM_PX;
+        if let Ok(mut root) = bubbles.get_mut(entity) {
+            root.translation = bubble::screen_to_world(at).extend(0.0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -437,6 +478,7 @@ mod tests {
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
@@ -493,6 +535,7 @@ mod tests {
             teleporters: Vec::new(),
             depth_map: None,
             depth_range: 32.0,
+            pan: None,
             script: None,
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
@@ -738,5 +781,158 @@ mod tests {
             Vec3::new(1.0, 0.0, 2.0)
         );
         assert!(world.get::<ScriptBroken>(actor_entity).is_some());
+    }
+
+    /// Anchored bubbles re-project their speaker every frame; free-
+    /// placed bubbles stay where the script put them.
+    #[test]
+    fn anchored_bubbles_track_their_speaker() {
+        use bevy::camera::RenderTarget;
+        use crate::scripts::Said;
+        use bevy::asset::RenderAssetUsages;
+        use bevy::render::camera::camera_system;
+        use bevy::render::render_resource::{
+            Extent3d, TextureDimension, TextureFormat,
+        };
+
+        let mut world = World::new();
+        let mut images = Assets::<Image>::default();
+        let target = images.add(Image::new_fill(
+            Extent3d {
+                width: 320,
+                height: 240,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[0, 0, 0, 255],
+            TextureFormat::Rgba8UnormSrgb,
+            RenderAssetUsages::default(),
+        ));
+        world.insert_resource(images);
+        world.init_resource::<bevy::render::texture::ManualTextureViews>();
+        world.init_resource::<bevy::ecs::message::Messages<bevy::window::WindowResized>>();
+        world.init_resource::<bevy::ecs::message::Messages<bevy::window::WindowCreated>>();
+        world.init_resource::<bevy::ecs::message::Messages<
+            bevy::window::WindowScaleFactorChanged,
+        >>();
+        world.init_resource::<bevy::ecs::message::Messages<
+            bevy::asset::AssetEvent<Image>,
+        >>();
+        let camera_transform =
+            Transform::from_xyz(0.0, 6.0, 9.0).looking_at(Vec3::ZERO, Vec3::Y);
+        world.spawn((
+            GameCamera,
+            Camera::default(),
+            RenderTarget::Image(target.into()),
+            GlobalTransform::from(camera_transform),
+            Projection::Perspective(PerspectiveProjection {
+                fov: 45.0_f32.to_radians(),
+                aspect_ratio: 320.0 / 240.0,
+                ..default()
+            }),
+        ));
+        // world_to_viewport needs the camera's computed target info.
+        world
+            .run_system_once(camera_system)
+            .map(|_: ()| ())
+            .unwrap();
+
+        // The speaker sits under an identity root, so world == local.
+        let root = world.spawn_empty().id();
+        world.spawn((crate::systems::scene::SceneGraphics(root),));
+        world.entity_mut(root).insert(GlobalTransform::IDENTITY);
+
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<Assets<ColorMaterial>>();
+        world.init_resource::<Assets<crate::systems::bubble::GradientMaterial>>();
+        world.init_resource::<bubble::BubbleTheme>();
+        world.insert_resource(crate::text::test_assets());
+        let assets = bubble::test_assets(&mut world);
+        world.insert_resource(assets);
+
+        let mut anchored_bubble = Entity::PLACEHOLDER;
+        let mut free_bubble = Entity::PLACEHOLDER;
+        world.resource_scope::<crate::text::TextAssets, _>(|world, text_assets| {
+            let text_assets = text_assets.into_inner();
+            let assets = world.resource::<bubble::BubbleAssets>().clone();
+            let theme = *world.resource::<bubble::BubbleTheme>();
+            anchored_bubble = bubble::spawn_bubble(
+                &mut world.commands(),
+                &assets,
+                &text_assets,
+                &theme,
+                bubble::BubbleParams {
+                    text: "yay".into(),
+                    at: Vec2::new(140.0, 100.0),
+                    tail: Some(Vec2::NEG_Y),
+                    free: false,
+                    ttl: None,
+                    wait: false,
+                },
+            );
+            free_bubble = bubble::spawn_bubble(
+                &mut world.commands(),
+                &assets,
+                &text_assets,
+                &theme,
+                bubble::BubbleParams {
+                    text: "menu".into(),
+                    at: Vec2::new(160.0, 40.0),
+                    tail: None,
+                    free: true,
+                    ttl: None,
+                    wait: false,
+                },
+            );
+        });
+        world.flush();
+
+        let speaker_at = Vec3::new(1.0, 0.0, 1.0);
+        world.spawn((
+            Actor {
+                script: None,
+                bubble: Some(anchored_bubble),
+                said: Some(Said {
+                    at: None,
+                    ..default()
+                }),
+            },
+            Transform::from_translation(speaker_at),
+            GlobalTransform::from(Transform::from_translation(speaker_at)),
+        ));
+        world.spawn((
+            Actor {
+                script: None,
+                bubble: Some(free_bubble),
+                said: Some(Said {
+                    at: Some([160.0, 40.0]),
+                    ..default()
+                }),
+            },
+            Transform::default(),
+            GlobalTransform::default(),
+        ));
+
+        world.run_system_once(track_anchored_bubbles).unwrap();
+
+        // The anchored bubble sits over the speaker; the free one stays.
+        let (camera, camera_transform) = world
+            .query::<(&Camera, &GlobalTransform)>()
+            .single(&world)
+            .unwrap();
+        let expected = camera
+            .world_to_viewport(camera_transform, speaker_at)
+            .unwrap()
+            - Vec2::Y * SAY_HEADROOM_PX;
+        let anchored = world.get::<Transform>(anchored_bubble).unwrap();
+        assert_eq!(
+            anchored.translation,
+            bubble::screen_to_world(expected).extend(0.0)
+        );
+        let free = world.get::<Transform>(free_bubble).unwrap();
+        assert_eq!(
+            free.translation,
+            bubble::screen_to_world(Vec2::new(160.0, 40.0)).extend(0.0)
+        );
     }
 }

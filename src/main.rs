@@ -24,8 +24,8 @@ use bevy_common_assets::ron::RonAssetPlugin;
 use crate::input::InputManager;
 use crate::scene::Scene;
 use crate::systems::{
-    actor, animation, bubble, camera, debug_draw, depth_card, input as sys_input, party, player,
-    scene as scene_loader, teleport, ui, world, world_script,
+    actor, animation, bubble, camera, debug_draw, depth_card, input as sys_input, pan, party,
+    player, scene as scene_loader, teleport, ui, world, world_script,
 };
 use std::path::Path;
 
@@ -103,7 +103,11 @@ struct PlayerModel(Handle<Gltf>);
 type GameCameraQuery<'w, 's> = Query<
     'w,
     's,
-    (&'static mut Transform, &'static mut Projection),
+    (
+        &'static mut Transform,
+        &'static mut Projection,
+        &'static mut Camera,
+    ),
     (With<GameCamera>, Without<Player>),
 >;
 
@@ -187,6 +191,8 @@ fn main() {
             animation::resolve_pending_animations,
             bubble::fit_bubbles,
             bubble::animate_bubbles,
+            actor::track_anchored_bubbles,
+            pan::follow_player.run_if(in_state(game_state::GameState::Scene)),
             debug_draw::debug_draw_walkables,
         ),
     )

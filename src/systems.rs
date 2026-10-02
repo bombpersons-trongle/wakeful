@@ -8,6 +8,7 @@ pub mod camera;
 pub mod debug_draw;
 pub mod depth_card;
 pub mod input;
+pub mod pan;
 pub mod party;
 pub mod player;
 pub mod scene;
