@@ -81,6 +81,8 @@ pub(crate) struct ParticipantDef {
     pub(crate) brain: Option<String>,
     pub(crate) time_until_act: f32,
     pub(crate) bag: rhai::Map,
+    /// Player-side combatant: reaping a wiped player side means defeat.
+    pub(crate) player: bool,
 }
 
 /// `start_battle` arguments, verbatim from the script.
@@ -321,6 +323,8 @@ pub(crate) struct Combatant {
     pub(crate) time_until_act: f32,
     pub(crate) bag: rhai::Map,
     pub(crate) brain: Option<Brain>,
+    /// Player-side combatant: a wiped player side is a defeat.
+    pub(crate) player: bool,
     /// Out of the fight: its die clip played and it no longer acts.
     pub(crate) dead: bool,
 }
@@ -433,6 +437,11 @@ pub(crate) fn register_battle_api(
                         .get("bag")
                         .and_then(|v| v.clone().try_cast::<rhai::Map>())
                         .unwrap_or_default();
+                    let player = map
+                        .get("player")
+                        .and_then(|v| v.clone().as_bool().ok())
+                        .unwrap_or(false)
+                        || bag.get("player").and_then(|v| v.clone().as_bool().ok()) == Some(true);
                     defs.push(ParticipantDef {
                         id,
                         model,
@@ -441,6 +450,7 @@ pub(crate) fn register_battle_api(
                         brain,
                         time_until_act,
                         bag,
+                        player,
                     });
                 }
                 battle.push(BattleRequest::Start(StartBattle {
@@ -937,6 +947,7 @@ pub(crate) fn stage_battle(
             time_until_act: def.time_until_act,
             bag: def.bag.clone(),
             brain,
+            player: def.player,
             dead: false,
         });
     }
@@ -1320,19 +1331,17 @@ fn reap_deaths(state: &mut Battle) -> Vec<(Entity, String)> {
     for index in deaths {
         let c = &mut state.participants[index];
         c.dead = true;
+        bevy::log::info!("battle: {} reaped (hp<=0)", c.id);
         played.push((c.entity, "die".to_owned()));
         state.dying.push((index, DIE_SETTLE_SECS));
     }
-    let is_player = |c: &Combatant| {
-        c.bag
-            .get("player")
-            .is_some_and(|v| v.clone().as_bool() == Ok(true))
-    };
-    let players_alive = state.participants.iter().any(|c| !c.dead && is_player(c));
-    let monsters_alive = state.participants.iter().any(|c| !c.dead && !is_player(c));
+    let players_alive = state.participants.iter().any(|c| !c.dead && c.player);
+    let monsters_alive = state.participants.iter().any(|c| !c.dead && !c.player);
     if !monsters_alive {
+        bevy::log::info!("battle: finish (victory)");
         state.result = Some("victory".to_owned());
     } else if !players_alive {
+        bevy::log::info!("battle: finish (defeat)");
         state.result = Some("defeat".to_owned());
     }
     played
@@ -1358,6 +1367,7 @@ mod tests {
                     time_until_act: 0.1,
                     bag: rhai::Map::new(),
                     brain: None,
+                    player: true,
                     dead: true,
                 },
                 Combatant {
@@ -1367,6 +1377,7 @@ mod tests {
                     time_until_act: 9.0,
                     bag: rhai::Map::new(),
                     brain: None,
+                    player: false,
                     dead: false,
                 },
             ],
@@ -1414,6 +1425,7 @@ mod tests {
                 time_until_act: 0.0,
                 bag: rhai::Map::new(),
                 brain: None,
+                player: false,
                 dead: false,
             }],
             actions: BTreeMap::new(),
@@ -1442,12 +1454,7 @@ mod tests {
     #[test]
     fn reaping_buries_the_slain_and_finishes_the_fight() {
         let player_bag = |hp: f64| -> rhai::Map {
-            [
-                ("hp".into(), Dynamic::from(hp)),
-                ("player".into(), Dynamic::from(true)),
-            ]
-            .into_iter()
-            .collect()
+            [("hp".into(), Dynamic::from(hp))].into_iter().collect()
         };
         let monster_bag = |hp: f64| -> rhai::Map {
             [("hp".into(), Dynamic::from(hp))].into_iter().collect()
@@ -1462,6 +1469,7 @@ mod tests {
                     time_until_act: 0.0,
                     bag: player_bag(0.0),
                     brain: None,
+                    player: true,
                     dead: false,
                 },
                 Combatant {
@@ -1471,6 +1479,7 @@ mod tests {
                     time_until_act: 0.0,
                     bag: monster_bag(10.0),
                     brain: None,
+                    player: false,
                     dead: false,
                 },
             ],
@@ -1512,6 +1521,7 @@ mod tests {
                     time_until_act: 1.2,
                     bag: rhai::Map::new(),
                     brain: None,
+                    player: false,
                     dead: false,
                 },
                 Combatant {
@@ -1521,6 +1531,7 @@ mod tests {
                     time_until_act: 0.3,
                     bag: rhai::Map::new(),
                     brain: None,
+                    player: false,
                     dead: false,
                 },
             ],
@@ -1850,6 +1861,7 @@ mod tests {
                 time_until_act: 0.0,
                 bag: rhai::Map::new(),
                 brain: None,
+                player: false,
                 dead: false,
             }],
             actions: BTreeMap::new(),
@@ -1928,6 +1940,7 @@ mod tests {
                         brain: None,
                         time_until_act: 0.0,
                         bag: rhai::Map::new(),
+                        player: true,
                     },
                     ParticipantDef {
                         id: "goblin".into(),
@@ -1937,6 +1950,7 @@ mod tests {
                         brain: None,
                         time_until_act: 0.0,
                         bag: rhai::Map::new(),
+                        player: false,
                     },
                 ],
             }),
