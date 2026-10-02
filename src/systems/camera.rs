@@ -28,7 +28,10 @@ pub fn setup_game_camera(mut commands: Commands, game_image: Res<GameImage>) {
         Camera3d::default(),
         Camera {
             order: 1,
-            clear_color: ClearColorConfig::None,
+            // The scene pass draws everything now (the background is a
+            // depth card), so it owns the clear like the battle pass:
+            // without it the image would smear the previous frame.
+            clear_color: ClearColorConfig::Default,
             is_active: false,
             ..default()
         },

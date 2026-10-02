@@ -101,6 +101,8 @@ pub fn check_requests<'w, 's>(
     state: Option<Res<crate::world_state::WorldState>>,
     battle_handle: Option<Res<crate::battle::BattleHandle>>,
     battle: Option<Res<crate::battle::Battle>>,
+    graphics: Option<Res<crate::systems::scene::SceneGraphics>>,
+    grounds: Query<(Entity, &Visibility), With<crate::Ground>>,
     render: RenderDumpParams<'w, 's>,
     mut characters: Query<(
         Entity,
@@ -140,6 +142,17 @@ pub fn check_requests<'w, 's>(
                     "battle-handle: active={} requests={}",
                     handle.active(),
                     handle.pending_requests()
+                ));
+            }
+            if let Some(graphics) = &graphics {
+                let grounds: Vec<String> = grounds
+                    .iter()
+                    .map(|(e, v)| format!("{} v={:?}", e.index(), *v))
+                    .collect();
+                lines.push(format!(
+                    "graphics_root: {} grounds=[{}]",
+                    graphics.0.index(),
+                    grounds.join(", ")
                 ));
             }
             let active = render

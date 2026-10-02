@@ -6,6 +6,7 @@ pub mod animation;
 pub mod bubble;
 pub mod camera;
 pub mod debug_draw;
+pub mod depth_card;
 pub mod input;
 pub mod party;
 pub mod player;

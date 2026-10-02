@@ -24,9 +24,12 @@ chests that stay open because you opened them.
 - Type is a pixel bitmap font (Pixel Operator), drawn at pixel scale
   to match the 16-bit look.
 - Devroom's backgrounds are real photographs — standing in for the
-  painted background art a production would commission. The ground grid
-  in each scene tells the engine where the player may walk, matching
-  the fixed-camera staging of the genre.
+  painted background art a production would commission. Each background
+  ships with a depth map, and the engine turns the pair into a depth
+  card: real geometry in the scene camera's pass, so characters and
+  background occlude each other correctly (step behind an awning and it
+  covers you). The ground grid in each scene tells the engine where the
+  player may walk, matching the fixed-camera staging of the genre.
 
 ## Camera and movement
 
@@ -47,7 +50,8 @@ chests that stay open because you opened them.
 
 A scene file (RON) declares everything a single room contains:
 
-- the background image and camera pose,
+- the background image, its depth map, and the camera pose — together
+  they become the depth card the scene renders as its room,
 - the walkable grid,
 - teleporters that carry the player to another scene at an arrival
   point (with re-arming so the doorway doesn't instantly bounce back),

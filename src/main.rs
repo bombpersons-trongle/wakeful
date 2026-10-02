@@ -24,7 +24,7 @@ use bevy_common_assets::ron::RonAssetPlugin;
 use crate::input::InputManager;
 use crate::scene::Scene;
 use crate::systems::{
-    actor, animation, bubble, camera, debug_draw, input as sys_input, party, player,
+    actor, animation, bubble, camera, debug_draw, depth_card, input as sys_input, party, player,
     scene as scene_loader, teleport, ui, world, world_script,
 };
 use std::path::Path;
@@ -51,20 +51,9 @@ pub(crate) struct Player;
 struct GameCamera;
 
 /// Marks the placeholder ground plane; hidden while the scene shows a
-/// pre-rendered background.
+/// depth card.
 #[derive(Component)]
-struct Ground;
-
-/// Sprite spawned for the scene's background image; despawned with the
-/// background camera on scene change, and respawned by the editor when
-/// the background path changes.
-#[derive(Component)]
-struct BackgroundSprite;
-
-/// Per-scene camera that draws the background layer; spawned by
-/// `apply_scene` and despawned on scene change.
-#[derive(Component)]
-struct BackgroundCamera;
+pub(crate) struct Ground;
 
 /// The scene the game is currently running. `load_scene` inserts it with a
 /// handle whose asset loads asynchronously; `apply_scene` polls it until
@@ -190,6 +179,7 @@ fn main() {
             bubble::sync_theme,
             scene_loader::apply_scene,
             scene_loader::sync_ground,
+            depth_card::build_pending_cards,
             party::sync_player_model,
             party::attach_player_model,
             actor::attach_actor_models,

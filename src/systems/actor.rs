@@ -435,6 +435,8 @@ mod tests {
             },
             walkable: None,
             teleporters: Vec::new(),
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
@@ -489,6 +491,8 @@ mod tests {
             },
             walkable: None,
             teleporters: Vec::new(),
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: vec![crate::scene::Actor {
                 model: "models/goblin.glb".into(),
@@ -531,7 +535,7 @@ mod tests {
         world.insert_resource(gltfs);
         world.spawn((
             Actor {
-                script: None,
+            script: None,
                 bubble: None,
                 said: None,
             },

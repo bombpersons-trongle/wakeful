@@ -18,8 +18,7 @@ use crate::assets::assets_root;
 use crate::scene::{CameraPose, Scene, WalkableGrid};
 use crate::screen;
 use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
-use crate::systems::scene::{spawn_background, SceneGraphics};
-use crate::{BackgroundSprite, CurrentScene, GameCamera, GameCameraQuery, Player};
+use crate::{CurrentScene, GameCamera, GameCameraQuery, Player};
 
 /// Read-only camera access for picking rays in the editor.
 type GameCameraRefs<'w, 's> =
@@ -203,13 +202,9 @@ fn sync_camera(
 #[allow(clippy::too_many_arguments)]
 fn ui(
     mut ctxs: EguiContexts,
-    mut commands: Commands,
-    assets: Res<AssetServer>,
     mut scenes: ResMut<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     state: ResMut<EditorState>,
-    background_sprites: Query<Entity, With<BackgroundSprite>>,
-    graphics: Option<Res<SceneGraphics>>,
 ) {
     let state = state.into_inner();
     if !state.open {
@@ -228,18 +223,7 @@ fn ui(
     egui::Window::new("Scene editor").show(ctx, |ui| {
         camera_ui(ui, &mut scene);
         ui.separator();
-        let Some(graphics) = graphics else {
-            return;
-        };
-        background_ui(
-            ui,
-            &mut scene,
-            &mut state.background_field,
-            &mut commands,
-            &assets,
-            &background_sprites,
-            &graphics,
-        );
+        background_ui(ui, &mut scene, &mut state.background_field);
         ui.separator();
         walkable_ui(ui, &mut scene);
         ui.separator();
@@ -288,27 +272,16 @@ fn axis_fields(ui: &mut egui::Ui, value: &mut [f32; 3], label: &str) {
     });
 }
 
-fn background_ui(
-    ui: &mut egui::Ui,
-    scene: &mut Scene,
-    field: &mut String,
-    commands: &mut Commands,
-    assets: &AssetServer,
-    sprites: &Query<Entity, With<BackgroundSprite>>,
-    graphics: &SceneGraphics,
-) {
+fn background_ui(ui: &mut egui::Ui, scene: &mut Scene, field: &mut String) {
     ui.label("Background image (path under assets/, empty = none)");
     ui.text_edit_singleline(field);
+    // Applies to the scene file only; the card (and the rest of the
+    // scene) rebuilds when the scene next applies. The editor's
+    // background/depth-map story is due for a rework anyway.
     if ui.button("Apply").clicked() {
         let path = trimmed_path(field);
         if path != scene.background {
             scene.background = path.clone();
-            for entity in sprites.iter() {
-                commands.entity(entity).despawn();
-            }
-            if let Some(path) = &scene.background {
-                spawn_background(commands, assets, path, graphics);
-            }
         }
     }
 }

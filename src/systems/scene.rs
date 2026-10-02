@@ -1,8 +1,6 @@
 //! Scene loading and application: the systems that turn a loaded
 //! `assets/scenes/*.scene` file into live entities and resources.
 
-use bevy::camera::RenderTarget;
-use bevy::camera::visibility::RenderLayers;
 use bevy::prelude::*;
 use rhai::Scope;
 
@@ -13,17 +11,12 @@ use crate::screen;
 use crate::scripts::{SceneScript as SceneScriptRuntime, ScriptBroken, ScriptEnv};
 use crate::systems::actor::{self, Actor};
 use crate::systems::bubble::SpeechBubble;
+use crate::systems::depth_card;
 use crate::systems::party::Party;
 use crate::systems::player;
 use crate::systems::ui::{UiApi, UiWindow, close_all};
 use crate::world_state::WorldState;
-use crate::{
-    BackgroundCamera, BackgroundSprite, CurrentScene, GameCameraQuery, Ground, PendingTeleport,
-    Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed,
-};
-
-/// Camera layer that draws the pre-rendered background image.
-const BG_LAYER: usize = 2;
+use crate::{CurrentScene, GameCameraQuery, Ground, PendingTeleport, Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed};
 
 /// The scene file the game loads; the editor saves back to this path via
 /// the copy stored on `CurrentScene`.
@@ -47,10 +40,10 @@ pub(crate) struct SceneScript {
 }
 
 /// Tears the old scene down when a teleporter was touched: despawns
-/// everything it brought (background camera, background sprite, player)
-/// and points `CurrentScene` at the destination file. The destination's
-/// application — camera pose, background, fresh player — then goes
-/// through `apply_scene` like any scene load.
+/// everything it brought (depth card, actors, bubbles) and points
+/// `CurrentScene` at the destination file. The destination's application
+/// — camera pose, background card, fresh player — then goes through
+/// `apply_scene` like any scene load.
 #[allow(clippy::too_many_arguments)]
 pub fn transition_scene(
     mut commands: Commands,
@@ -59,8 +52,7 @@ pub fn transition_scene(
     current: Option<ResMut<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
     mut party: ResMut<Party>,
-    backgrounds: Query<Entity, With<BackgroundSprite>>,
-    bg_cameras: Query<Entity, With<BackgroundCamera>>,
+    cards: Query<Entity, Or<(With<depth_card::DepthCard>, With<depth_card::DepthCardPending>)>>,
     actors: Query<Entity, With<Actor>>,
     bubbles: Query<Entity, With<SpeechBubble>>,
     mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
@@ -73,9 +65,8 @@ pub fn transition_scene(
     // The player is NOT despawned: it's a persistent view of the party
     // leader, and rebuilding it would flash the placeholder cone and
     // reload the model every transition. apply_scene repositions it.
-    for entity in backgrounds
+    for entity in cards
         .iter()
-        .chain(bg_cameras.iter())
         .chain(actors.iter())
         .chain(bubbles.iter())
     {
@@ -116,14 +107,13 @@ pub fn transition_scene(
 }
 
 /// Applies the scene once its file has loaded: camera pose, background
-/// layer, and the player — repositioned if it survives from the last
+/// card, and the player — repositioned if it survives from the last
 /// scene, spawned fresh (placeholder cone; the party dresses it) on
 /// first load.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_scene(
     mut commands: Commands,
     assets: Res<AssetServer>,
-    game_image: Res<screen::GameImage>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
@@ -159,24 +149,24 @@ pub fn apply_scene(
         ..default()
     });
 
-    // The background camera always clears the image (with the global clear
-    // color) so the 3D camera can draw over it without clearing.
-    commands.spawn((
-        BackgroundCamera,
-        Camera2d,
-        Camera {
-            order: 0,
-            ..default()
-        },
-        Msaa::Off, // must be explicit: the default is 4x, which would
-        // mismatch the single-sampled game image once a background
-        // sprite gives this camera a depth-bearing 2d pass.
-        RenderTarget::Image(game_image.0.clone().into()),
-        RenderLayers::layer(BG_LAYER),
-    ));
-
-    if let Some(path) = &scene.background {
-        spawn_background(&mut commands, &assets, path, &graphics);
+    // The background is real geometry: a depth card in the scene
+    // camera's pass, built once its images load. A background without its
+    // required depth map is an authoring error; the placeholder ground
+    // stands in (sync_ground) rather than leaving a void.
+    match (&scene.background, &scene.depth_map) {
+        (Some(path), Some(depth_path)) => {
+            commands.spawn(depth_card::DepthCardPending {
+                pose: scene.camera,
+                depth_range: scene.depth_range,
+                depth: assets.load(depth_path),
+                background: assets.load(path),
+            });
+        }
+        (Some(_), None) => warn!(
+            "scene {}: background without a depth map — the placeholder ground stands in",
+            current.path
+        ),
+        _ => {}
     }
 
     // Every scene application starts a fresh player at the scene's chosen
@@ -285,32 +275,6 @@ pub(crate) fn run_scene_scripts(
     }
 }
 
-/// Spawns the scene's background image on its dedicated layer. Also used
-/// by the editor when the background path changes at runtime.
-pub(crate) fn spawn_background(
-    commands: &mut Commands,
-    assets: &AssetServer,
-    path: &str,
-    graphics: &SceneGraphics,
-) {
-    let sprite = commands
-        .spawn((
-            BackgroundSprite,
-            Sprite {
-                image: assets.load(path.to_owned()),
-                // Backgrounds are authored at the virtual resolution.
-                custom_size: Some(Vec2::new(
-                    screen::GAME_WIDTH as f32,
-                    screen::GAME_HEIGHT as f32,
-                )),
-                ..default()
-            },
-            RenderLayers::layer(BG_LAYER),
-        ))
-        .id();
-    commands.entity(graphics.0).add_child(sprite);
-}
-
 /// Strips a `#SceneN` sub-asset suffix from a character-model path: the
 /// model's default scene is used regardless. Scene files written when the
 /// suffix was part of the contract keep loading.
@@ -321,22 +285,23 @@ pub(crate) fn gltf_asset_path(path: &str) -> String {
     }
 }
 
-/// Hides the placeholder ground while the scene shows a pre-rendered
-/// background, and brings it back when the background is cleared. Runs
-/// every frame so live editor edits react immediately.
+/// Hides the placeholder ground while the scene shows a depth card, and
+/// brings it back when there is no card (no background, or a background
+/// missing its required depth map). Runs every frame so live editor
+/// edits react immediately.
 pub fn sync_ground(
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     mut grounds: Query<&mut Visibility, With<Ground>>,
 ) {
-    let has_background = current
+    let has_card = current
         .as_ref()
         .and_then(|c| scenes.get(&c.handle))
-        .is_some_and(|scene| scene.background.is_some());
+        .is_some_and(|scene| scene.background.is_some() && scene.depth_map.is_some());
     let Ok(mut visibility) = grounds.single_mut() else {
         return;
     };
-    *visibility = if has_background {
+    *visibility = if has_card {
         Visibility::Hidden
     } else {
         Visibility::Visible
@@ -363,20 +328,12 @@ pub(crate) fn setup_graphics(mut commands: Commands) {
 }
 
 /// `OnEnter(Battle)`: the scene steps aside — one toggle on the scene
-/// graphics root folds the background, ground, actors, and player away
-/// while the arena has the screen, and the background camera stops
-/// compositing. Every managed model root defers to its ancestors
-/// (`Inherited` when revealed, `Hidden` before the first driven step),
-/// so a parent toggle is the whole suspension.
-pub(crate) fn suspend_scene(
-    mut commands: Commands,
-    graphics: Res<SceneGraphics>,
-    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
-) {
+/// graphics root folds the card, ground, actors, and player away while
+/// the arena has the screen. Every managed model root defers to its
+/// ancestors (`Inherited` when revealed, `Hidden` before the first
+/// driven step), so a parent toggle is the whole suspension.
+pub(crate) fn suspend_scene(mut commands: Commands, graphics: Res<SceneGraphics>) {
     commands.entity(graphics.0).insert(Visibility::Hidden);
-    for mut camera in &mut bg_cameras {
-        camera.is_active = false;
-    }
 }
 
 /// `OnEnter(Scene)`: fires at the transition's covered point — the
@@ -386,15 +343,11 @@ pub(crate) fn resume_scene(
     // The init state transition fires OnEnter(Scene) before Startup has
     // run, so the graphics root may not exist yet; the hook no-ops.
     graphics: Option<Res<SceneGraphics>>,
-    mut bg_cameras: Query<&mut Camera, With<BackgroundCamera>>,
 ) {
     let Some(graphics) = graphics else {
         return;
     };
     commands.entity(graphics.0).insert(Visibility::Visible);
-    for mut camera in &mut bg_cameras {
-        camera.is_active = true;
-    }
 }
 
 
@@ -425,7 +378,7 @@ mod tests {
         )
     }
 
-    fn test_scene(background: Option<&str>) -> Scene {
+    fn test_scene(background: Option<&str>, depth_map: Option<&str>) -> Scene {
         Scene {
             background: background.map(str::to_string),
             camera: CameraPose {
@@ -435,15 +388,17 @@ mod tests {
             },
             walkable: None,
             teleporters: Vec::new(),
+            depth_map: depth_map.map(str::to_string),
+            depth_range: 32.0,
             script: None,
             actors: Vec::new(),
         }
     }
 
-    fn world_with_scene(background: Option<&str>) -> (World, Entity) {
+    fn world_with_scene(background: Option<&str>, depth_map: Option<&str>) -> (World, Entity) {
         let mut world = World::new();
         let mut assets = Assets::<Scene>::default();
-        let handle = assets.add(test_scene(background));
+        let handle = assets.add(test_scene(background, depth_map));
         world.insert_resource(assets);
         world.insert_resource(CurrentScene {
             handle,
@@ -464,15 +419,27 @@ mod tests {
     }
 
     #[test]
-    fn ground_hides_while_a_background_is_set() {
-        let (mut world, ground) = world_with_scene(Some("backgrounds/room.png"));
+    fn ground_hides_while_a_depth_card_is_set() {
+        let (mut world, ground) = world_with_scene(
+            Some("backgrounds/room.png"),
+            Some("backgrounds/room_depth.png"),
+        );
         world.run_system_once(sync_ground).unwrap();
         assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Hidden));
     }
 
+    /// A background without its required depth map is an authoring
+    /// error; the placeholder ground stands in rather than a void.
+    #[test]
+    fn ground_stands_in_when_the_depth_map_is_missing() {
+        let (mut world, ground) = world_with_scene(Some("backgrounds/room.png"), None);
+        world.run_system_once(sync_ground).unwrap();
+        assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Visible));
+    }
+
     #[test]
     fn ground_returns_when_the_background_is_cleared() {
-        let (mut world, ground) = world_with_scene(None);
+        let (mut world, ground) = world_with_scene(None, None);
         world.entity_mut(ground).insert(Visibility::Hidden);
         world.run_system_once(sync_ground).unwrap();
         assert_eq!(world.get::<Visibility>(ground), Some(&Visibility::Visible));
@@ -498,7 +465,10 @@ mod tests {
         server.register_asset(&assets);
         world.insert_resource(server);
         world.insert_resource(crate::systems::ui::UiApi::new());
-        let handle = assets.add(test_scene(Some("backgrounds/room1.png")));
+        let handle = assets.add(test_scene(
+            Some("backgrounds/room1.png"),
+            Some("backgrounds/room1_depth.png"),
+        ));
         world.insert_resource(assets);
         world.insert_resource(CurrentScene {
             handle,
@@ -511,8 +481,7 @@ mod tests {
             target: "scenes/room2.scene".to_string(),
             arrival: Vec2::new(3.0, 4.0),
         });
-        world.spawn((BackgroundSprite, Sprite::default()));
-        world.spawn((BackgroundCamera, Camera2d));
+        world.spawn((depth_card::DepthCard, Transform::default()));
         world.spawn((Player, Transform::default()));
         world
     }
@@ -523,11 +492,9 @@ mod tests {
         world.run_system_once(transition_scene).unwrap();
         world.flush();
 
-        let mut sprites = world.query::<&BackgroundSprite>();
-        let mut cams = world.query::<&BackgroundCamera>();
+        let mut cards = world.query::<&depth_card::DepthCard>();
         let mut players = world.query::<&Player>();
-        assert_eq!(sprites.iter(&world).count(), 0);
-        assert_eq!(cams.iter(&world).count(), 0);
+        assert_eq!(cards.iter(&world).count(), 0);
         // The player persists across scenes (a view of the party leader).
         assert_eq!(players.iter(&world).count(), 1);
         assert!(world.get_resource::<PlayerModel>().is_none());
@@ -557,6 +524,8 @@ mod tests {
                 target: "scenes/elsewhere.scene".into(),
                 arrival: [0.0, 0.0],
             }],
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: Vec::new(),
         }
@@ -597,7 +566,7 @@ mod tests {
     fn a_surviving_player_is_repositioned_and_keeps_its_body() {
         // The player persists across scenes: apply must move it instead
         // of duplicating it, and whatever body the party attached stays.
-        let mut world = world_for_apply(test_scene(None), Some(Vec2::new(3.0, 4.0)));
+        let mut world = world_for_apply(test_scene(None, None), Some(Vec2::new(3.0, 4.0)));
         let player = world.spawn((Player, Transform::default())).id();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
@@ -629,7 +598,7 @@ mod tests {
 
     #[test]
     fn apply_scene_spawns_the_player_at_the_arrival_point() {
-        let mut world = world_for_apply(test_scene(None), Some(Vec2::new(3.0, 4.0)));
+        let mut world = world_for_apply(test_scene(None, None), Some(Vec2::new(3.0, 4.0)));
         world.run_system_once(apply_scene).unwrap();
         world.flush();
 
@@ -642,7 +611,7 @@ mod tests {
 
     #[test]
     fn the_first_scene_spawns_the_player_at_the_origin() {
-        let mut world = world_for_apply(test_scene(None), None);
+        let mut world = world_for_apply(test_scene(None, None), None);
         world.run_system_once(apply_scene).unwrap();
         world.flush();
 

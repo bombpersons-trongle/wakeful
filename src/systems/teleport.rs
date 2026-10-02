@@ -137,6 +137,8 @@ mod tests {
                 target: "scenes/room2.scene".into(),
                 arrival: [1.0, 2.0],
             }],
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: Vec::new(),
         }

@@ -14,6 +14,18 @@ pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
     /// the game's virtual resolution (320x240), like a pre-rendered FF7 room.
     pub background: Option<String>,
+    /// Path to the background's depth map, relative to `assets/`: one value
+    /// per background pixel encodes the ray distance from the scene camera
+    /// (normalized over `depth_range`). With a map, the background renders
+    /// as a depth card — real geometry in the scene camera's pass — so the
+    /// z-buffer resolves character/background occlusion in both
+    /// directions.
+    #[serde(default)]
+    pub depth_map: Option<String>,
+    /// The world-space distance the depth map's maximum value encodes, in
+    /// meters. Only meaningful alongside `depth_map`.
+    #[serde(default = "default_depth_range")]
+    pub depth_range: f32,
     pub camera: CameraPose,
     pub walkable: Option<WalkableGrid>,
     /// Trigger rects that load another scene when the player touches one.
@@ -30,6 +42,10 @@ pub struct Scene {
     /// optional Rhai script that moves them each tick.
     #[serde(default)]
     pub actors: Vec<Actor>,
+}
+
+fn default_depth_range() -> f32 {
+    32.0
 }
 
 #[derive(Deserialize, Serialize, Clone, Copy)]
@@ -431,6 +447,8 @@ mod tests {
                 target: "scenes/room2.scene".into(),
                 arrival: [1.0, 2.0],
             }],
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: Vec::new(),
         };
@@ -667,6 +685,8 @@ mod tests {
             },
             walkable: None,
             teleporters: Vec::new(),
+            depth_map: None,
+            depth_range: 32.0,
             script: None,
             actors: Vec::new(),
         }

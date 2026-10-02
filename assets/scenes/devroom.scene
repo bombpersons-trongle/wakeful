@@ -20,6 +20,11 @@
         ],
     )),
     background: Some("backgrounds/carlisle.png"),
+    // Synthetic placeholder depth (tools/generate_test_depth.py) until
+    // the Blender exporter authors the real one: the walkable floor plus
+    // a foreground slab at 10m to prove both occlusion directions.
+    depth_map: Some("backgrounds/devroom_depth.png"),
+    depth_range: 32.0,
     // Actors: the goblin trails the player and counts your meetings;
     // the two chests share one script but carry their own identity
     // (private memory) and contents (params.item).
