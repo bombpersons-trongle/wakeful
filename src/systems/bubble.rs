@@ -467,9 +467,14 @@ pub(crate) fn dismiss_bubble(bubble: &mut SpeechBubble) {
 /// dismisses it in the same breath.
 pub(crate) fn dismiss_on_confirm(
     input: Res<crate::input::InputManager>,
+    captures: Res<crate::input::InputCaptures>,
     mut bubbles: Query<&mut SpeechBubble>,
 ) {
-    if !input.just_pressed(crate::input::PadButton::Cross) {
+    // A captured cross belongs to its capturer (the free camera's fly-
+    // backward); bubbles never see it.
+    if captures.blocks(crate::input::PadButton::Cross)
+        || !input.just_pressed(crate::input::PadButton::Cross)
+    {
         return;
     }
     for mut bubble in &mut bubbles {
@@ -1055,6 +1060,9 @@ mod tests {
         let manager =
             crate::input::InputManager::with_just_pressed(&[crate::input::PadButton::Cross]);
         world.insert_resource(manager);
+        // A fresh, local claim table: the process-global one is shared
+        // with whatever other tests are running.
+        world.insert_resource(crate::input::InputCaptures::default());
     }
 
     #[test]

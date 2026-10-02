@@ -49,7 +49,7 @@ use bevy::log::warn;
 use bevy::prelude::Component;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
 
-use crate::input::InputHandle;
+use crate::input::{InputCaptures, InputHandle, PadButton};
 use crate::systems::ui::UiApi;
 use crate::world_state::{SharedMap, WorldState};
 
@@ -356,46 +356,84 @@ fn register_party_api(engine: &mut Engine, sink: &Arc<Mutex<Vec<PartyCommand>>>)
 /// Registers the input readers every tier shares: name-based queries
 /// against the manager's shared state; unknown names are strict errors
 /// so typos surface instead of silently reading false.
+///
+/// A button captured by a script reads false here for everyone — the
+/// capturer reads the raw state through `capture`/`capture_just_pressed`,
+/// which claim the button (for this tick only; unre-asserted claims
+/// expire) and report the truth in one call. That is how the free camera
+/// owns the d-pad without gameplay or menus feeling a ghost press.
 fn register_input_api(engine: &mut Engine, input: &InputHandle) {
+    let captures = InputCaptures::shared();
     let pressed = input.clone();
     engine.register_fn(
         "pressed",
         move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let button = PadButton::from_config(name).ok_or_else(|| unknown_action(name))?;
+            if captures.blocks(button) {
+                return Ok(false);
+            }
             let state = pressed.lock().unwrap_or_else(PoisonError::into_inner);
-            state
-                .pressed_by_name(name)
-                .ok_or_else(|| unknown_action(name))
+            Ok(state.pressed(button))
         },
     );
     let just_pressed = input.clone();
+    let captures = InputCaptures::shared();
     engine.register_fn(
         "just_pressed",
         move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let button = PadButton::from_config(name).ok_or_else(|| unknown_action(name))?;
+            if captures.blocks(button) {
+                return Ok(false);
+            }
             let state = just_pressed.lock().unwrap_or_else(PoisonError::into_inner);
-            state
-                .just_pressed_by_name(name)
-                .ok_or_else(|| unknown_action(name))
+            Ok(state.just_pressed(button))
         },
     );
     let just_released = input.clone();
+    let captures = InputCaptures::shared();
     engine.register_fn(
         "just_released",
         move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let button = PadButton::from_config(name).ok_or_else(|| unknown_action(name))?;
+            if captures.blocks(button) {
+                return Ok(false);
+            }
             let state = just_released.lock().unwrap_or_else(PoisonError::into_inner);
-            state
-                .just_released_by_name(name)
-                .ok_or_else(|| unknown_action(name))
+            Ok(state.just_released(button))
         },
     );
     let axis = input.clone();
     engine.register_fn(
         "axis",
         move |name: &str| -> Result<f64, Box<rhai::EvalAltResult>> {
+            // Sticks are sensors, not buttons: nothing can capture them.
             let state = axis.lock().unwrap_or_else(PoisonError::into_inner);
             state
                 .axis_by_name(name)
                 .map(|v| v as f64)
                 .ok_or_else(|| unknown_action(name))
+        },
+    );
+    let capturer = input.clone();
+    let captures = InputCaptures::shared();
+    engine.register_fn(
+        "capture",
+        move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let button = PadButton::from_config(name).ok_or_else(|| unknown_action(name))?;
+            captures.claim(button);
+            let state = capturer.lock().unwrap_or_else(PoisonError::into_inner);
+            Ok(state.pressed(button))
+        },
+    );
+    let capturer = input.clone();
+    let captures = InputCaptures::shared();
+    engine.register_fn(
+        "capture_just_pressed",
+        move |name: &str| -> Result<bool, Box<rhai::EvalAltResult>> {
+            let button = PadButton::from_config(name).ok_or_else(|| unknown_action(name))?;
+            captures.claim(button);
+            let state = capturer.lock().unwrap_or_else(PoisonError::into_inner);
+            Ok(state.just_pressed(button))
         },
     );
 }
@@ -1303,6 +1341,63 @@ mod tests {
                 .update(&mut Scope::new(), 0.0, 0.0, 0.0, 0.0, 0.5)
                 .is_err()
         );
+    }
+
+    /// A captured button belongs to its capturer: `capture` reads the
+    /// raw state while `pressed` — here and in every other script and
+    /// engine system — reads false until the claim expires.
+    #[test]
+    fn a_captured_button_is_invisible_to_pressed() {
+        use crate::input::{InputCaptures, InputManager, PadButton};
+
+        // The claim table is process-global; serialize the tests that
+        // manipulate it so parallel rotations can't flake the assertions.
+        let _guard = crate::input::CAPTURE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        let captures = InputCaptures::shared();
+        captures.clear();
+        let manager = InputManager::standard();
+        manager
+            .handle()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .inject(&[PadButton::Cross], &[], &[]);
+        let script = ActorScript::compile_with_handle(
+            r#"
+            fn on_update(x, z, player_x, player_z, dt) {
+                raw = capture("cross");
+                hidden = pressed("cross");
+            }
+            "#,
+            ScriptEnv::new(
+                manager.handle(),
+                UiApi::new(),
+                WorldState::default(),
+                crate::battle::BattleHandle::new(),
+            ),
+        )
+        .unwrap();
+        let mut scope = Scope::new();
+        scope.push("raw", false);
+        scope.push("hidden", true);
+        // Tick one: the claim is still pending, so `pressed` leaks the
+        // button this once (the documented one-tick latency).
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<bool>("raw"), Some(true));
+        assert_eq!(scope.get_value::<bool>("hidden"), Some(true));
+
+        // Head of the next tick: the claim takes effect and `pressed`
+        // goes dark while the capturer keeps reading the raw state.
+        captures.rotate();
+        script.update(&mut scope, 0.0, 0.0, 0.0, 0.0, 0.5).unwrap();
+        assert_eq!(scope.get_value::<bool>("raw"), Some(true));
+        assert_eq!(scope.get_value::<bool>("hidden"), Some(false));
+
+        // And once the capturer stops, the claim dies at the next
+        // rotation (asserted in input.rs); this table is process-global,
+        // so leave it clean.
+        captures.clear();
     }
 
     #[test]

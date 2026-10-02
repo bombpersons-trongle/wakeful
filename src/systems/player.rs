@@ -77,6 +77,7 @@ pub(crate) struct PlaceholderBody;
 pub fn move_player(
     time: Res<Time>,
     input: Res<crate::input::InputManager>,
+    captures: Res<crate::input::InputCaptures>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
     editor: Option<Res<EditorState>>,
@@ -100,12 +101,14 @@ pub fn move_player(
     // Input actions are camera-relative: up walks away from the camera,
     // right walks to its screen-right, so controls stay intuitive
     // whichever way the scene's camera faces. The dpad and the (gated)
-    // left stick sum into the same vector.
-    let screen = input.movement();
+    // left stick sum into the same vector — minus whatever a script
+    // captured (the free camera flying on the d-pad).
+    let screen = input.movement(&captures);
 
     let from = transform.translation.xz();
     let direction = camera_relative_direction(screen, forward);
-    let running = input.pressed(crate::input::PadButton::R2);
+    let running = !captures.blocks(crate::input::PadButton::R2)
+        && input.pressed(crate::input::PadButton::R2);
     let speed = if running {
         PLAYER_RUN_SPEED
     } else {

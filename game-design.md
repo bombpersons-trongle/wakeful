@@ -103,7 +103,10 @@ What they can do, in broad strokes:
   a menu asks it to, and scene changes close stray windows.
 - **Input playback**: invoke any configured PlayStation action by name
   (as found in `assets/input.ron`), reading presses or just-pressed
-  edges.
+  edges. A script can also *capture* buttons per tick — a captured
+  button reads false everywhere else (engine, other scripts), so a
+  mode like the free camera can own the d-pad without the game
+  feeling a ghost press.
 - **Per-instance configuration**: `params` from the scene data are
   readable as typed values, so one chest script serves every chest.
 

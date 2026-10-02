@@ -132,6 +132,7 @@ fn main() {
     .init_resource::<ButtonInput<GamepadButton>>()
     .init_resource::<Axis<GamepadAxis>>()
     .insert_resource(InputManager::load())
+    .insert_resource(crate::input::InputCaptures::shared())
     .insert_resource(ui::UiApi::new())
     .insert_resource(world_state::WorldState::default())
     .insert_resource(battle::BattleHandle::new())

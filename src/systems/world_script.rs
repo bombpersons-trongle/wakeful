@@ -200,6 +200,7 @@ mod tests {
         world.insert_resource(Party::default());
         world.insert_resource(Time::<()>::default());
         world.insert_resource(InputManager::standard());
+        world.insert_resource(crate::input::InputCaptures::default());
         let api = UiApi::new();
         world.insert_resource(api.clone());
         let handle = world.resource::<InputManager>().handle();

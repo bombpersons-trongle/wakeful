@@ -565,14 +565,20 @@ pub(crate) fn close_all(
         .clear();
 }
 
-/// Advances menu navigation from this tick's aggregated input.
-pub(crate) fn navigate(api: Res<UiApi>, input: Res<crate::input::InputManager>) {
+/// Advances menu navigation from this tick's aggregated input. A
+/// captured button is invisible here — the capturer owns it.
+pub(crate) fn navigate(
+    api: Res<UiApi>,
+    input: Res<crate::input::InputManager>,
+    captures: Res<crate::input::InputCaptures>,
+) {
     let state = input.handle();
     let input = state.lock().unwrap_or_else(PoisonError::into_inner);
+    let filtered = input.excluding(&captures.claimed_set());
     api.menus
         .lock()
         .unwrap_or_else(PoisonError::into_inner)
-        .navigate(&input);
+        .navigate(&filtered);
 }
 
 #[cfg(test)]

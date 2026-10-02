@@ -11,7 +11,12 @@
 //! geometric gamepad enums internally (Cross→South, Circle→East, ...).
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
+
+/// Serializes the tests that manipulate the process-global claim table
+/// (`InputCaptures::shared`) — see `unclaimed_claims_expire_at_the_rotation`.
+#[cfg(test)]
+pub(crate) static CAPTURE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 use bevy::input::gamepad::{GamepadAxis, GamepadButton};
 use bevy::input::keyboard::KeyCode;
@@ -458,6 +463,18 @@ impl InputState {
         self.axes.get(&axis).copied().unwrap_or(0.0)
     }
 
+    /// A copy of this state with the claimed buttons stripped — the view
+    /// every reader but the capturer is entitled to.
+    pub fn excluding(&self, claimed: &BTreeSet<PadButton>) -> InputState {
+        let mut filtered = self.clone();
+        for button in claimed {
+            filtered.pressed.remove(button);
+            filtered.just_pressed.remove(button);
+            filtered.just_released.remove(button);
+        }
+        filtered
+    }
+
     /// Name-based lookups for the script API; `None` is an unknown name.
     pub fn pressed_by_name(&self, name: &str) -> Option<bool> {
         Some(self.pressed(PadButton::from_config(name)?))
@@ -506,6 +523,77 @@ impl InputState {
 /// running game (tests, detached content).
 pub fn detached() -> InputHandle {
     Arc::new(Mutex::new(InputState::default()))
+}
+
+/// The buttons a script has captured, hidden from every other reader —
+/// engine systems and scripts alike. A captured button reads false
+/// through `pressed`/`just_pressed`/`axis`; the capturer reads the raw
+/// state through `capture`/`capture_just_pressed`, which claim and read
+/// in one call.
+///
+/// Claims are level-triggered: a script re-asserts them every tick, and
+/// a claim that is not re-asserted expires at the next rotation — so a
+/// broken or disabled script releases its buttons on its own.
+#[derive(Clone, Default, Resource)]
+pub struct InputCaptures {
+    current: Arc<Mutex<BTreeSet<PadButton>>>,
+    next: Arc<Mutex<BTreeSet<PadButton>>>,
+}
+
+impl InputCaptures {
+    /// The one shared claim table. Script engines and engine systems
+    /// must agree on whose buttons are captured, and both reach this
+    /// instance: host functions through `register_input_api`, systems
+    /// through the resource inserted at boot.
+    pub fn shared() -> Self {
+        static SHARED: OnceLock<InputCaptures> = OnceLock::new();
+        SHARED.get_or_init(Default::default).clone()
+    }
+
+    /// Claims `button` for the next tick.
+    pub fn claim(&self, button: PadButton) {
+        self.next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(button);
+    }
+
+    /// Whether `button` is captured this tick (hidden from other readers).
+    pub fn blocks(&self, button: PadButton) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .contains(&button)
+    }
+
+    /// A snapshot of this tick's claimed buttons.
+    pub fn claimed_set(&self) -> BTreeSet<PadButton> {
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Head-of-tick rotation: the claims asserted last tick take effect,
+    /// and anything not re-asserted since expires.
+    pub fn rotate(&self) {
+        let mut next = self.next.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        *current = std::mem::take(&mut next);
+    }
+
+    /// Empties both queues (tests).
+    #[cfg(test)]
+    pub fn clear(&self) {
+        self.next
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        self.current
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
 }
 
 /// Aggregated input for one fixed tick. Systems read the manager;
@@ -577,10 +665,12 @@ impl InputManager {
     }
 
     /// The gated movement vector: dpad bits plus the left stick, each
-    /// stick direction counting only past the deadzone.
-    pub fn movement(&self) -> Vec2 {
+    /// stick direction counting only past the deadzone. Captured buttons
+    /// don't count — a flying free camera owns the d-pad while it's on.
+    pub fn movement(&self, captured: &InputCaptures) -> Vec2 {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        movement_vector(&state.pressed, &state.axes)
+        let claimed = captured.claimed_set();
+        movement_vector(&state.pressed, &state.axes, &claimed)
     }
 
     /// Rebuilds the shared state from raw device resources.
@@ -618,18 +708,23 @@ struct InputConfigFile {
 }
 
 /// The gameplay movement vector: dpad bits plus the gated left stick.
-pub fn movement_vector(pressed: &BTreeSet<PadButton>, axes: &BTreeMap<PadAxis, f32>) -> Vec2 {
+/// `claimed` buttons are ignored — a script that captured the d-pad owns it.
+pub fn movement_vector(
+    pressed: &BTreeSet<PadButton>,
+    axes: &BTreeMap<PadAxis, f32>,
+    claimed: &BTreeSet<PadButton>,
+) -> Vec2 {
     let mut vector = Vec2::ZERO;
-    if pressed.contains(&PadButton::DPadLeft) {
+    if !claimed.contains(&PadButton::DPadLeft) && pressed.contains(&PadButton::DPadLeft) {
         vector.x -= 1.0;
     }
-    if pressed.contains(&PadButton::DPadRight) {
+    if !claimed.contains(&PadButton::DPadRight) && pressed.contains(&PadButton::DPadRight) {
         vector.x += 1.0;
     }
-    if pressed.contains(&PadButton::DPadUp) {
+    if !claimed.contains(&PadButton::DPadUp) && pressed.contains(&PadButton::DPadUp) {
         vector.y += 1.0;
     }
-    if pressed.contains(&PadButton::DPadDown) {
+    if !claimed.contains(&PadButton::DPadDown) && pressed.contains(&PadButton::DPadDown) {
         vector.y -= 1.0;
     }
     let stick_x = digital(axes.get(&PadAxis::LeftStickX).copied().unwrap_or(0.0));
@@ -680,12 +775,16 @@ impl InjectedInputs {
 
 pub fn aggregate_inputs(
     mut manager: ResMut<InputManager>,
+    captures: Res<crate::input::InputCaptures>,
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     pad_buttons: Res<ButtonInput<GamepadButton>>,
     pad_axes: Res<Axis<GamepadAxis>>,
     injected: Option<ResMut<InjectedInputs>>,
 ) {
+    // Claims asserted by scripts last tick take effect; unre-asserted
+    // ones expire here.
+    captures.rotate();
     manager.aggregate(&keys, &mouse, &pad_buttons, &pad_axes);
     if let Some(mut injected) = injected {
         let state = manager.handle();
@@ -845,17 +944,51 @@ mod tests {
     fn the_movement_vector_combines_dpad_and_gated_stick() {
         let mut pressed = BTreeSet::new();
         let mut axes = BTreeMap::new();
-        assert_eq!(movement_vector(&pressed, &axes), Vec2::ZERO);
+        let none = BTreeSet::new();
+        assert_eq!(movement_vector(&pressed, &axes, &none), Vec2::ZERO);
 
         pressed.insert(PadButton::DPadRight);
         pressed.insert(PadButton::DPadUp);
-        assert_eq!(movement_vector(&pressed, &axes), Vec2::new(1.0, 1.0));
+        assert_eq!(movement_vector(&pressed, &axes, &none), Vec2::new(1.0, 1.0));
 
         // A soft stick deflects to nothing; a firm one counts once.
         axes.insert(PadAxis::LeftStickX, 0.15);
-        assert_eq!(movement_vector(&pressed, &axes), Vec2::new(1.0, 1.0));
+        assert_eq!(movement_vector(&pressed, &axes, &none), Vec2::new(1.0, 1.0));
         axes.insert(PadAxis::LeftStickX, 0.9);
-        assert_eq!(movement_vector(&pressed, &axes), Vec2::new(2.0, 1.0));
+        assert_eq!(movement_vector(&pressed, &axes, &none), Vec2::new(2.0, 1.0));
+    }
+
+    #[test]
+    fn a_captured_dpad_does_not_move_the_player() {
+        let mut pressed = BTreeSet::new();
+        let axes = BTreeMap::new();
+        let mut claimed = BTreeSet::new();
+        pressed.insert(PadButton::DPadUp);
+        claimed.insert(PadButton::DPadUp);
+        assert_eq!(movement_vector(&pressed, &axes, &claimed), Vec2::ZERO);
+
+        // An uncaptured direction still reads.
+        pressed.insert(PadButton::DPadRight);
+        assert_eq!(movement_vector(&pressed, &axes, &claimed), Vec2::new(1.0, 0.0));
+    }
+
+    #[test]
+    fn unclaimed_claims_expire_at_the_rotation() {
+        // The claim table is process-global; tests that manipulate it
+        // take this lock (scripts.rs does too) so parallel rotations
+        // can't flake the assertions.
+        let _guard = CAPTURE_TEST_LOCK.lock().unwrap_or_else(PoisonError::into_inner);
+        let captures = InputCaptures::shared();
+        captures.clear();
+        captures.claim(PadButton::Cross);
+        assert!(!captures.blocks(PadButton::Cross), "claims start pending");
+        captures.rotate();
+        assert!(captures.blocks(PadButton::Cross));
+
+        // Not re-asserted: the next rotation drops it.
+        captures.rotate();
+        assert!(!captures.blocks(PadButton::Cross));
+        captures.clear();
     }
 
     #[test]
