@@ -810,6 +810,49 @@ impl InputManager {
 }
 
 #[cfg(test)]
+mod arrow_probe {
+    use super::*;
+    use bevy::input::ButtonInput;
+
+    /// The shipped input.ron binds arrows alongside WASD: pressing
+    /// either must light the same dpad action.
+    #[test]
+    fn arrows_and_wasd_both_drive_the_dpad() {
+        let text = std::fs::read_to_string(
+            crate::assets::assets_root().join("input.ron"),
+        )
+        .expect("input.ron readable");
+        let config: InputConfigFile = ron::from_str(&text).expect("parses");
+        let (bindings, skipped) = Bindings::parse_config(config.buttons);
+        assert_eq!(skipped, 0, "every shipped binding parses");
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::ArrowUp);
+        let active = bindings.active(
+            &keys,
+            &ButtonInput::<MouseButton>::default(),
+            &ButtonInput::<GamepadButton>::default(),
+        );
+        assert!(
+            active.contains(&PadButton::DPadUp),
+            "ArrowUp must drive dpad_up, got {active:?}"
+        );
+
+        let mut keys = ButtonInput::<KeyCode>::default();
+        keys.press(KeyCode::KeyW);
+        let active = bindings.active(
+            &keys,
+            &ButtonInput::<MouseButton>::default(),
+            &ButtonInput::<GamepadButton>::default(),
+        );
+        assert!(
+            active.contains(&PadButton::DPadUp),
+            "KeyW must drive dpad_up, got {active:?}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use bevy::input::ButtonInput;
 
