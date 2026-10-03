@@ -17,7 +17,9 @@ sleep 40   # asset + scene load
 ```
 
 Launching with `--console` instead adds an interactive rhai REPL on
-stdin (same evaluator as the `eval` tool) for hands-on sessions.
+stdin (same evaluator as the `eval` tool) for hands-on sessions —
+line editing with up/down history on a terminal, plain lines when
+stdin is piped.
 
 `BEVY_ASSET_ROOT` or `WAKEFUL_MCP_PORT` can override defaults. A busy
 port is skipped quietly by a second instance.

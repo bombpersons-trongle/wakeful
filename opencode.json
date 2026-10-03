@@ -5,6 +5,11 @@
       "type": "remote",
       "url": "http://127.0.0.1:8399/mcp",
       "enabled": true
+    },
+    "blender": {
+      "type": "local",
+      "command": ["npx", "-y", "@modelcontextprotocol/server-bundle", "run", "/opencode_projects/mcpb_tools/blender-1.0.3.mcpb"],
+      "enabled": true
     }
   }
 }

@@ -214,40 +214,76 @@ pub(crate) fn repl_skips(line: &str) -> bool {
 
 /// An interactive rhai REPL on stdin: each line runs through the same
 /// executor as the MCP `eval` tool, results and errors print inline.
-/// Ends quietly at EOF (piped or nohup launches simply have no
-/// console). Blocks its own thread.
+/// On a terminal, rustyline provides line editing with up/down
+/// history; on piped stdin it falls back to plain lines. Ends quietly
+/// at EOF. Blocks its own thread.
 pub(crate) fn spawn_repl(commands: bevy::prelude::Res<DebugCommands>) {
     let commands = DebugCommands::clone(&commands);
     let result = std::thread::Builder::new()
         .name("debug-repl".into())
         .spawn(move || {
-            use std::io::{BufRead as _, Write as _};
-            let stdin = std::io::stdin();
-            println!("wakeful console: rhai lines, ctrl-d exits");
+            use rustyline::error::ReadlineError;
+            use std::io::IsTerminal as _;
+            // Check up front: rustyline would eat buffered piped input
+            // before we notice it is not a terminal.
+            if !std::io::stdin().is_terminal() {
+                return plain_repl(commands);
+            }
+            println!(
+                "wakeful console: rhai lines, up/down recalls history, ctrl-d exits"
+            );
+            let Ok(mut editor) = rustyline::DefaultEditor::new() else {
+                return plain_repl(commands);
+            };
             loop {
-                print!("rhai> ");
-                std::io::stdout().flush().ok();
-                let Some(Ok(line)) = stdin.lock().lines().next() else {
-                    break;
+                let line = match editor.readline("rhai> ") {
+                    Ok(line) => {
+                        let _ = editor.add_history_entry(line.as_str());
+                        line
+                    }
+                    Err(ReadlineError::Interrupted) => continue,
+                    Err(ReadlineError::Eof) => break,
+                    Err(e) => {
+                        println!("error: {e}");
+                        break;
+                    }
                 };
                 if repl_skips(&line) {
                     continue;
                 }
-                let (tx, rx) = std::sync::mpsc::sync_channel(1);
-                commands.push(DebugCommand {
-                    kind: DebugKind::Eval(line),
-                    reply: tx,
-                });
-                match rx.recv_timeout(REPLY_TIMEOUT) {
-                    Ok(Ok(DebugReply::Text(text))) => println!("{text}"),
-                    Ok(Ok(_)) => println!("(no value)"),
-                    Ok(Err(message)) => println!("error: {message}"),
-                    Err(_) => println!("error: the game did not answer in time"),
-                }
+                eval_line(&commands, &line);
             }
         });
     if let Err(e) = result {
         bevy::log::warn!("debug console could not spawn: {e}");
+    }
+}
+
+/// The REPL's stdin without a terminal: same evaluator, no editing.
+fn plain_repl(commands: DebugCommands) {
+    use std::io::BufRead as _;
+    let stdin = std::io::stdin();
+    for line in stdin.lock().lines() {
+        let Ok(line) = line else { break };
+        if repl_skips(&line) {
+            continue;
+        }
+        eval_line(&commands, &line);
+    }
+}
+
+/// Runs one console line and prints the result or the error.
+fn eval_line(commands: &DebugCommands, line: &str) {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    commands.push(DebugCommand {
+        kind: DebugKind::Eval(line.to_owned()),
+        reply: tx,
+    });
+    match rx.recv_timeout(REPLY_TIMEOUT) {
+        Ok(Ok(DebugReply::Text(text))) => println!("{text}"),
+        Ok(Ok(_)) => println!("(no value)"),
+        Ok(Err(message)) => println!("error: {message}"),
+        Err(_) => println!("error: the game did not answer in time"),
     }
 }
 
