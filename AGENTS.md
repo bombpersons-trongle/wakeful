@@ -73,8 +73,12 @@ Contributors work like any outside contributor — no special privileges:
   `movement.rs` is ECS-free and unit tested.
 - Art direction: FF7-style — 3D characters over pre-rendered backgrounds.
   The ground plane is a placeholder until real background art exists.
-- The debug shot layer (`src/debug_shot.rs`, `cfg(debug_assertions)`) renders
-  the game to screenshots and accepts input injection for agent-driven
-  visual verification.
+- The debug layer (`src/debug_shot.rs` + `src/debug_server.rs`, both
+  `cfg(debug_assertions)`): debug builds serve an MCP server on
+  `127.0.0.1:8399/mcp` (see `.opencode/skill/wakeful-debug`) whose
+  tools screenshot the game, inject input, dump state, and run rhai
+  against the live world — agent-driven verification without
+  recompiles. Commands flow through a queue drained at the head of
+  the fixed tick; screenshots land in `.debug/shots/`.
 - `src/bin/snapshot_mac_os.rs` was removed — the debug shot layer replaced
   it.

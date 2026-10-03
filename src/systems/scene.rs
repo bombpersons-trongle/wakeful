@@ -40,6 +40,14 @@ pub(crate) struct SceneScript {
     entered: bool,
 }
 
+/// Everything a scene transition tears down: depth cards (built or
+/// pending), actors, bubbles.
+type SceneTeardown<'w, 's> = (
+    Query<'w, 's, Entity, Or<(With<depth_card::DepthCard>, With<depth_card::DepthCardPending>)>>,
+    Query<'w, 's, Entity, With<Actor>>,
+    Query<'w, 's, Entity, With<SpeechBubble>>,
+);
+
 /// Tears the old scene down when a teleporter was touched: despawns
 /// everything it brought (depth card, actors, bubbles) and points
 /// `CurrentScene` at the destination file. The destination's application
@@ -53,9 +61,7 @@ pub fn transition_scene(
     current: Option<ResMut<CurrentScene>>,
     applied: Option<ResMut<SceneApplied>>,
     mut party: ResMut<Party>,
-    cards: Query<Entity, Or<(With<depth_card::DepthCard>, With<depth_card::DepthCardPending>)>>,
-    actors: Query<Entity, With<Actor>>,
-    bubbles: Query<Entity, With<SpeechBubble>>,
+    teardown: SceneTeardown<'_, '_>,
     mut scene_scripts: Query<(Entity, &mut SceneScript, Option<&ScriptBroken>)>,
     ui: Res<UiApi>,
     ui_windows: Query<(Entity, &UiWindow)>,
@@ -66,11 +72,8 @@ pub fn transition_scene(
     // The player is NOT despawned: it's a persistent view of the party
     // leader, and rebuilding it would flash the placeholder cone and
     // reload the model every transition. apply_scene repositions it.
-    for entity in cards
-        .iter()
-        .chain(actors.iter())
-        .chain(bubbles.iter())
-    {
+    let (cards, actors, bubbles) = teardown;
+    for entity in cards.iter().chain(actors.iter()).chain(bubbles.iter()) {
         commands.entity(entity).despawn();
     }
     // UI windows are scene-agnostic names over live entities: scene
@@ -124,6 +127,7 @@ pub fn apply_scene(
     ui: Res<UiApi>,
     state: Res<WorldState>,
     battle: Res<crate::battle::BattleHandle>,
+    world: Res<crate::scripts::WorldCommands>,
     graphics: Res<SceneGraphics>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
@@ -214,7 +218,13 @@ pub fn apply_scene(
             .collect(),
     ));
 
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
+    let env = ScriptEnv::new(
+        input.handle(),
+        ui.clone(),
+        state.clone(),
+        battle.clone(),
+        world.clone(),
+    );
     let scene_path = current.path.as_str();
     actor::spawn_actors(
         &mut commands,
@@ -552,6 +562,7 @@ mod tests {
         world.insert_resource(crate::systems::party::Party::default());
         world.insert_resource(crate::world_state::WorldState::default());
         world.insert_resource(crate::battle::BattleHandle::new());
+        world.insert_resource(crate::scripts::WorldCommands::default());
         let graphics = SceneGraphics(world.spawn_empty().id());
         world.insert_resource(graphics);
         let server = test_asset_server();

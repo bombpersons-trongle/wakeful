@@ -24,6 +24,12 @@ serde = { version = "1", features = ["derive"] }
 # Same major version bevy_image pulls in, PNG-only: encodes debug
 # screenshots (see src/debug_shot.rs).
 image = { version = "0.25", default-features = false, features = ["png"] }
+rmcp = { version = "3.5.0", features = ["server", "transport-streamable-http-server"] }
+axum = "0.8.9"
+tokio = { version = "1.53.2", features = ["full"] }
+base64 = "0.23.1"
+serde_json = "1.0.151"
+schemars = "1.2.2"
 
 [dev-dependencies]
 # Mirrors bevy_gltf's own parser: validates the generated character model

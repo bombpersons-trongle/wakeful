@@ -2,6 +2,7 @@ mod assets;
 mod battle;
 #[cfg(debug_assertions)]
 mod debug_shot;
+mod debug_server;
 mod display;
 mod editor;
 mod game_state;
@@ -114,14 +115,29 @@ type GameCameraQuery<'w, 's> = Query<
 fn main() {
     let mut app = App::new();
     app.init_resource::<transition::TransitionState>();
-    app.add_plugins(DefaultPlugins.set(WindowPlugin {
-        primary_window: Some(Window {
-            title: "wakeful".into(),
-            resolution: WindowResolution::new(screen::GAME_WIDTH * 2, screen::GAME_HEIGHT * 2),
-            ..default()
-        }),
-        ..default()
-    }))
+    app.add_plugins(
+        DefaultPlugins
+            .set(WindowPlugin {
+                primary_window: Some(Window {
+                    title: "wakeful".into(),
+                    resolution: WindowResolution::new(
+                        screen::GAME_WIDTH * 2,
+                        screen::GAME_HEIGHT * 2,
+                    ),
+                    ..default()
+                }),
+                ..default()
+            })
+            .set(bevy::asset::AssetPlugin {
+                // Anchor bevy's asset root to the same folder our own
+                // file reads use, so direct binary launches (target/
+                // debug/wakeful) resolve assets from the checkout.
+                file_path: crate::assets::assets_root()
+                    .to_string_lossy()
+                    .into_owned(),
+                ..default()
+            }),
+    )
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
     .add_plugins(Material2dPlugin::<transition::TransitionMaterial>::default())
     // The dither/CRT final post stays off: it is a fullscreen pass and
@@ -140,6 +156,8 @@ fn main() {
     .insert_resource(ui::UiApi::new())
     .insert_resource(world_state::WorldState::default())
     .insert_resource(battle::BattleHandle::new())
+    .insert_resource(debug_server::DebugCommands::default())
+    .insert_resource(crate::scripts::WorldCommands::default())
     .init_resource::<battle::PendingBattleStart>()
     .init_state::<game_state::GameState>()
     .init_resource::<ui::UiPause>()
@@ -216,6 +234,7 @@ fn main() {
             scene_loader::run_scene_scripts.run_if(in_state(game_state::GameState::Scene)),
             world_script::run_world_scripts
                 .run_if(not(in_state(game_state::GameState::Transition))),
+            world_script::drain_world_commands,
             battle::battle_turns.run_if(in_state(game_state::GameState::Battle)),
             ui::drain,
             ui::sync_cursor,
@@ -241,11 +260,10 @@ fn main() {
 
     #[cfg(debug_assertions)]
     {
-        app.add_systems(Startup, debug_shot::setup);
-        app.add_systems(
-            Update,
-            (debug_shot::check_requests, debug_shot::check_input_requests),
-        );
+        app.add_systems(Startup, (debug_shot::setup, debug_server::spawn_server));
+        // The executor feeds the injected-input layer, so it runs at
+        // the head of the tick: a tap lands in this tick's aggregate.
+        app.add_systems(FixedUpdate, debug_shot::serve_debug_commands);
     }
 
     app.run();

@@ -899,6 +899,7 @@ pub(crate) fn stage_battle(
     input: Res<InputManager>,
     ui: Res<UiApi>,
     world_state: Res<WorldState>,
+    world_commands: Res<crate::scripts::WorldCommands>,
 ) {
     let Some(def) = pending.def.take() else {
         warn!("entered Battle without a pending start");
@@ -923,6 +924,7 @@ pub(crate) fn stage_battle(
         ui.clone(),
         world_state.clone(),
         handle.clone(),
+        (*world_commands).clone(),
     );
     let mut participants = Vec::new();
     for def in &def.participants {
@@ -1228,13 +1230,10 @@ fn sequence_turn(
                         home: state.participants[index].position,
                         target,
                     });
-                    match tick_action(state, dt) {
-                        Some(recovery) => {
-                            state.participants[index].time_until_act += recovery;
-                            state.acting = None;
-                            play_emotes(emote_targets, reap_deaths(state));
-                        }
-                        None => {}
+                    if let Some(recovery) = tick_action(state, dt) {
+                        state.participants[index].time_until_act += recovery;
+                        state.acting = None;
+                        play_emotes(emote_targets, reap_deaths(state));
                     }
                 }
             }
@@ -1450,6 +1449,7 @@ mod tests {
             UiApi::new(),
             crate::world_state::WorldState::default(),
             BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let script = std::sync::Arc::new(
             ActorScript::compile_with_handle(
@@ -1700,6 +1700,7 @@ mod tests {
             ui.clone(),
             crate::world_state::WorldState::default(),
             handle.clone(),
+            crate::scripts::WorldCommands::default(),
         );
         let brain = ActorScript::compile_with_handle(
             include_str!("../assets/scripts/battle/player_brain.rhai"),
@@ -1812,6 +1813,7 @@ mod tests {
                 UiApi::new(),
                 crate::world_state::WorldState::default(),
                 BattleHandle::new(),
+                crate::scripts::WorldCommands::default(),
             );
             if let Err(e) = WorldScript::compile_with_handle(&text, env) {
                 panic!("{} failed to compile: {e}", path.display());
@@ -1830,6 +1832,7 @@ mod tests {
             UiApi::new(),
             crate::world_state::WorldState::default(),
             handle.clone(),
+            crate::scripts::WorldCommands::default(),
         );
         let script = ActorScript::load("scripts/battle/attack_weapon.rhai", env)
             .expect("the shipped attack choreography must compile");
@@ -2157,6 +2160,7 @@ mod tests {
         world.insert_resource(UiApi::new());
         world.init_resource::<WorldState>();
 
+        world.insert_resource(crate::scripts::WorldCommands::default());
         world.run_system_once(stage_battle).unwrap();
         world.flush();
 

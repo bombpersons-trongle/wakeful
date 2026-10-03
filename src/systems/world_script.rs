@@ -35,8 +35,15 @@ pub(crate) fn startup(
     ui: Res<UiApi>,
     state: Res<WorldState>,
     battle: Res<crate::battle::BattleHandle>,
+    world: Res<crate::scripts::WorldCommands>,
 ) {
-    let env = ScriptEnv::new(input.handle(), ui.clone(), state.clone(), battle.clone());
+    let env = ScriptEnv::new(
+        input.handle(),
+        ui.clone(),
+        state.clone(),
+        battle.clone(),
+        world.clone(),
+    );
     spawn_world_scripts(&mut commands, &assets_root().join(WORLD_SCRIPTS_DIR), &env);
 }
 
@@ -149,6 +156,7 @@ mod tests {
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         spawn_world_scripts(&mut world.commands(), &dir.0, &env);
         world.flush();
@@ -179,6 +187,7 @@ mod tests {
             crate::systems::ui::UiApi::new(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         spawn_world_scripts(
             &mut world.commands(),
@@ -210,6 +219,7 @@ mod tests {
             api.clone(),
             WorldState::default(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let runtime = WorldScriptRuntime::compile_with_handle(
             include_str!("../../assets/scripts/world/triangle_menu.rhai"),
@@ -306,6 +316,7 @@ mod tests {
             crate::systems::ui::UiApi::new(),
             state.clone(),
             crate::battle::BattleHandle::new(),
+            crate::scripts::WorldCommands::default(),
         );
         let runtime = WorldScriptRuntime::compile_with_handle(
             include_str!("../../assets/scripts/world/roster.rhai"),
@@ -448,3 +459,37 @@ mod tests {
 }
 
 
+
+/// Drains script scene-operations: `warp_to` rides the teleporter's
+/// covered-point flow (the fade begins now, the scene swaps behind the
+/// cover), `teleport_player` repositions within the current scene.
+/// Both are Scene-only: a battle or a transition absorbs the request.
+pub(crate) fn drain_world_commands(
+    world: Res<crate::scripts::WorldCommands>,
+    state: Res<State<crate::game_state::GameState>>,
+    mut transitions: ResMut<crate::transition::TransitionState>,
+    mut commands: Commands,
+    mut player: Query<&mut Transform, With<crate::Player>>,
+) {
+    for request in world.take() {
+        if *state.get() != crate::game_state::GameState::Scene {
+            warn!("world command {request:?} ignored outside the Scene state");
+            continue;
+        }
+        match request {
+            crate::scripts::WorldRequest::Warp { scene, arrival } => {
+                commands.insert_resource(crate::systems::teleport::PendingSceneWarp {
+                    target: scene,
+                    arrival,
+                });
+                transitions.begin(crate::game_state::GameState::Scene, crate::transition::Effect::Fade);
+            }
+            crate::scripts::WorldRequest::Teleport { position } => {
+                if let Ok(mut transform) = player.single_mut() {
+                    transform.translation.x = position.x;
+                    transform.translation.z = position.y;
+                }
+            }
+        }
+    }
+}
