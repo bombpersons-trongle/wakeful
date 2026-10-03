@@ -36,6 +36,10 @@ fn decide(participant) {
         let picked = ui_confirmed("battle");
         if picked >= 0 {
             battle_set(phase_key, ());
+            // Committed: the menus come down while the choreography
+            // runs, and return with the next turn.
+            ui_close("battle");
+            ui_close("battle-actor");
             return #{action: "attack", target: foes[picked].id};
         }
         // Circle backs out to the action menu.
@@ -51,6 +55,8 @@ fn decide(participant) {
         battle_set(phase_key, "target");
     }
     if picked == 1 {
+        ui_close("battle");
+        ui_close("battle-actor");
         return "flee";
     }
     // Still deciding: the engine asks again next tick.

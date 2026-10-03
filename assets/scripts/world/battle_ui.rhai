@@ -11,6 +11,9 @@ fn on_update(dt) {
             print("battle over: closing windows");
             ui_close("battle-status");
             ui_close("battle");
+            // The acting label is the battle brain's window; the brain
+            // stops being polled once the fight is over.
+            ui_close("battle-actor");
             for id in recall("live_floats") {
                 ui_close("float" + id);
             }
