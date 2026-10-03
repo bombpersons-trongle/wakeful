@@ -199,6 +199,58 @@ impl ServerHandler for WakefulTools {
     }
 }
 
+/// True when the interactive stdin console was requested: debug
+/// builds running with `--console`.
+pub(crate) fn console_requested() -> bool {
+    cfg!(debug_assertions) && std::env::args().any(|arg| arg == "--console")
+}
+
+/// Lines the REPL hands to the evaluator: blanks and comment-only
+/// lines are skipped.
+pub(crate) fn repl_skips(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.is_empty() || trimmed.starts_with("//")
+}
+
+/// An interactive rhai REPL on stdin: each line runs through the same
+/// executor as the MCP `eval` tool, results and errors print inline.
+/// Ends quietly at EOF (piped or nohup launches simply have no
+/// console). Blocks its own thread.
+pub(crate) fn spawn_repl(commands: bevy::prelude::Res<DebugCommands>) {
+    let commands = DebugCommands::clone(&commands);
+    let result = std::thread::Builder::new()
+        .name("debug-repl".into())
+        .spawn(move || {
+            use std::io::{BufRead as _, Write as _};
+            let stdin = std::io::stdin();
+            println!("wakeful console: rhai lines, ctrl-d exits");
+            loop {
+                print!("rhai> ");
+                std::io::stdout().flush().ok();
+                let Some(Ok(line)) = stdin.lock().lines().next() else {
+                    break;
+                };
+                if repl_skips(&line) {
+                    continue;
+                }
+                let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                commands.push(DebugCommand {
+                    kind: DebugKind::Eval(line),
+                    reply: tx,
+                });
+                match rx.recv_timeout(REPLY_TIMEOUT) {
+                    Ok(Ok(DebugReply::Text(text))) => println!("{text}"),
+                    Ok(Ok(_)) => println!("(no value)"),
+                    Ok(Err(message)) => println!("error: {message}"),
+                    Err(_) => println!("error: the game did not answer in time"),
+                }
+            }
+        });
+    if let Err(e) = result {
+        bevy::log::warn!("debug console could not spawn: {e}");
+    }
+}
+
 /// Binds and serves, blocking its own thread. Called once at startup
 /// (debug builds); a busy port means another instance owns it and this
 /// one skips the server quietly.

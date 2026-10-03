@@ -260,7 +260,18 @@ fn main() {
 
     #[cfg(debug_assertions)]
     {
-        app.add_systems(Startup, (debug_shot::setup, debug_server::spawn_server));
+        if debug_server::console_requested() {
+            app.add_systems(
+                Startup,
+                (
+                    debug_shot::setup,
+                    debug_server::spawn_server,
+                    debug_server::spawn_repl,
+                ),
+            );
+        } else {
+            app.add_systems(Startup, (debug_shot::setup, debug_server::spawn_server));
+        }
         // The executor feeds the injected-input layer, so it runs at
         // the head of the tick: a tap lands in this tick's aggregate.
         app.add_systems(FixedUpdate, debug_shot::serve_debug_commands);

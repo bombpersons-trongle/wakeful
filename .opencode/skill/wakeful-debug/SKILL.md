@@ -16,6 +16,9 @@ nohup ./target/debug/wakeful > .debug/log 2>&1 &
 sleep 40   # asset + scene load
 ```
 
+Launching with `--console` instead adds an interactive rhai REPL on
+stdin (same evaluator as the `eval` tool) for hands-on sessions.
+
 `BEVY_ASSET_ROOT` or `WAKEFUL_MCP_PORT` can override defaults. A busy
 port is skipped quietly by a second instance.
 

@@ -79,6 +79,7 @@ Contributors work like any outside contributor — no special privileges:
   tools screenshot the game, inject input, dump state, and run rhai
   against the live world — agent-driven verification without
   recompiles. Commands flow through a queue drained at the head of
-  the fixed tick; screenshots land in `.debug/shots/`.
+  the fixed tick; screenshots land in `.debug/shots/`. Launching with
+  `--console` adds an interactive rhai REPL on stdin.
 - `src/bin/snapshot_mac_os.rs` was removed — the debug shot layer replaced
   it.

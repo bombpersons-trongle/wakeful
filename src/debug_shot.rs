@@ -242,15 +242,7 @@ fn run_console(
                 .exists()
         )
     })?;
-    let (value, changes) = runtime.call_console("console_entry").map_err(|e| {
-        format!(
-            "{e} [root={} lib_exists={}]",
-            crate::assets::assets_root().join("scripts").display(),
-            crate::assets::assets_root()
-                .join("scripts/lib/roster.rhai")
-                .exists()
-        )
-    })?;
+    let (value, changes) = runtime.call_console("console_entry").map_err(|e| e.to_string())?;
     console.party.apply(&changes);
     Ok(format!("{value}"))
 }
