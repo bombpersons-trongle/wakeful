@@ -136,13 +136,4 @@ fn first_foe(me) {
     ()
 }
 
-// Floating damage numbers are script-side too: drop an entry in the
-// battle store and the battle UI world script projects and animates it.
-fn float_text(foe, text) {
-    let floats = battle_get("floats");
-    if floats == () {
-        floats = [];
-    }
-    floats.push(#{text: text, x: foe.x, y: foe.y + 1.4, z: foe.z, age: 0.0});
-    battle_set("floats", floats);
-}
+

@@ -49,6 +49,7 @@ use bevy::log::warn;
 use bevy::prelude::Component;
 use rhai::{Dynamic, Engine, Map, Position, Scope};
 
+use crate::assets::assets_root;
 use crate::input::{InputCaptures, InputHandle, PadButton};
 use crate::systems::ui::UiApi;
 use crate::world_state::{SharedMap, WorldState};
@@ -269,6 +270,15 @@ impl CompiledScript {
         // Script print() lands in the game log — diagnostics live in
         // the same place as everything else.
         engine.on_print(|message| bevy::log::info!("[script] {message}"));
+        // `import "lib/<name>" as x;` resolves shared code under the
+        // scripts root, for every tier (a missing module is a compile
+        // error, so a broken import fails loudly like anything else).
+        let mut modules =
+            rhai::module_resolvers::FileModuleResolver::new_with_path(assets_root().join("scripts"));
+        // Libs re-read on every compile: editing a library lands with
+        // the next scene apply or battle staging, no restart needed.
+        modules.enable_cache(false);
+        engine.set_module_resolver(modules);
         register(&mut engine, &source);
         let ast = engine.compile(text)?;
         *source.lock().unwrap_or_else(PoisonError::into_inner) =
