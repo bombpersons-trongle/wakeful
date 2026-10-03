@@ -152,6 +152,8 @@ pub(crate) fn participant_map(
     position: Vec3,
     time_until_act: f32,
     bag: &rhai::Map,
+    player: bool,
+    dead: bool,
 ) -> rhai::Map {
     let mut map = rhai::Map::new();
     map.insert("id".into(), Dynamic::from(id.to_string()));
@@ -162,6 +164,8 @@ pub(crate) fn participant_map(
         "time_until_act".into(),
         Dynamic::from(time_until_act as f64),
     );
+    map.insert("player".into(), Dynamic::from(player));
+    map.insert("dead".into(), Dynamic::from(dead));
     for (key, value) in bag {
         map.insert(key.clone(), value.clone());
     }
@@ -339,6 +343,8 @@ pub(crate) struct Acting {
     /// Where the actor stood when it started (choreographies return
     /// here).
     pub(crate) home: Vec3,
+    /// Who the action was aimed at, as the brain's target pick.
+    pub(crate) target: String,
 }
 
 /// How long a dead fighter's die clip needs before the engine stops
@@ -1072,7 +1078,7 @@ fn sequence_turn(
     let maps: Vec<rhai::Map> = state
         .participants
         .iter()
-        .map(|c| participant_map(&c.id, c.position, c.time_until_act, &c.bag))
+        .map(|c| participant_map(&c.id, c.position, c.time_until_act, &c.bag, c.player, c.dead))
         .collect();
     battle.publish_participants(maps);
     battle.set_result(state.result.clone());
@@ -1137,9 +1143,16 @@ fn sequence_turn(
     let Some(index) = state.next_actor() else {
         return;
     };
-    let (id, position, time_until_act, bag) = {
+    let (id, position, time_until_act, bag, player, dead) = {
         let c = &state.participants[index];
-        (c.id.clone(), c.position, c.time_until_act, c.bag.clone())
+        (
+            c.id.clone(),
+            c.position,
+            c.time_until_act,
+            c.bag.clone(),
+            c.player,
+            c.dead,
+        )
     };
     let Some(brain) = state.participants[index].brain.as_ref() else {
         warn!("battle: participant {id} has no brain; idling");
@@ -1147,25 +1160,45 @@ fn sequence_turn(
         return;
     };
 
-    let participant = participant_map(&id, position, time_until_act, &bag);
+    let participant =
+        participant_map(&id, position, time_until_act, &bag, player, dead);
     let decision = decide_with_brain(brain, participant);
     match decision {
         Ok(choice) => {
-            let Some(action_name) = choice else {
+            let Some(choice) = choice else {
                 // Still deciding (a menu waiting for input): try again
                 // next tick.
                 return;
             };
             // A unit means the brain (usually the menu) is still
-            // deciding; anything non-string is a script bug.
-            if action_name.is_unit() {
+            // deciding; anything else non-string and non-map is a
+            // script bug. A map answer carries the target too:
+            // #{action: "attack", target: "goblin"}.
+            if choice.is_unit() {
                 return;
             }
-            let Ok(action_name) = action_name.into_string() else {
-                warn!("battle: brain for {id} returned a non-string action");
-                state.participants[index].time_until_act += 1.0;
-                return;
-            };
+            let (action_name, target) =
+                if let Some(answer) = choice.clone().try_cast::<rhai::Map>() {
+                    let action = answer
+                        .get("action")
+                        .and_then(|v| v.clone().try_cast::<String>());
+                    let Some(action) = action else {
+                        warn!("battle: brain for {id} answered a map without an action");
+                        state.participants[index].time_until_act += 1.0;
+                        return;
+                    };
+                    let target = answer
+                        .get("target")
+                        .and_then(|v| v.clone().try_cast::<String>())
+                        .unwrap_or_default();
+                    (action, target)
+                } else if let Ok(action) = choice.into_string() {
+                    (action, String::new())
+                } else {
+                    warn!("battle: brain for {id} returned a non-string action");
+                    state.participants[index].time_until_act += 1.0;
+                    return;
+                };
             let Some(handler) = state.actions.get(&action_name).cloned() else {
                 warn!("battle: no action '{action_name}' registered");
                 state.participants[index].time_until_act += 1.0;
@@ -1193,6 +1226,7 @@ fn sequence_turn(
                         body,
                         elapsed: 0.0,
                         home: state.participants[index].position,
+                        target,
                     });
                     match tick_action(state, dt) {
                         Some(recovery) => {
@@ -1275,7 +1309,7 @@ fn tick_action(state: &mut Battle, dt: f32) -> Option<f32> {
         return Some(1.0);
     };
     let c = &state.participants[acting.participant];
-    let actor = participant_map(&c.id, c.position, c.time_until_act, &c.bag);
+    let actor = participant_map(&c.id, c.position, c.time_until_act, &c.bag, c.player, c.dead);
     let mut state_map = rhai::Map::new();
     state_map.insert("time".into(), Dynamic::from(acting.elapsed as f64));
     state_map.insert(
@@ -1294,6 +1328,14 @@ fn tick_action(state: &mut Battle, dt: f32) -> Option<f32> {
         ]),
     );
     state_map.insert("dt".into(), Dynamic::from(dt as f64));
+    state_map.insert(
+        "target".into(),
+        if acting.target.is_empty() {
+            Dynamic::UNIT
+        } else {
+            Dynamic::from(acting.target.clone())
+        },
+    );
     let mut scope = Scope::new();
     match script.call_dynamic2(&mut scope, "run", actor.into(), state_map.into()) {
         Ok(choice) => {
@@ -1435,6 +1477,7 @@ mod tests {
                 body: ActionBody::File { script },
                 elapsed: 0.0,
                 home: Vec3::ZERO,
+                target: "goblin".into(),
             }),
             dying: Vec::new(),
         };
@@ -1509,6 +1552,79 @@ mod tests {
         assert_eq!(battle.result.as_deref(), Some("victory"));
     }
 
+    /// Two monsters: felling one keeps the fight going; the fight only
+    /// parks when a whole side is gone.
+    #[test]
+    fn reaping_one_of_two_monsters_keeps_the_fight_going() {
+        let monster = |hp: f64| -> rhai::Map {
+            [("hp".into(), Dynamic::from(hp))].into_iter().collect()
+        };
+        let mut battle = Battle {
+            arena: Entity::PLACEHOLDER,
+            participants: vec![
+                Combatant {
+                    id: "hero".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.0,
+                    bag: monster(60.0),
+                    brain: None,
+                    player: true,
+                    dead: false,
+                },
+                Combatant {
+                    id: "goblin".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.0,
+                    bag: monster(0.0),
+                    brain: None,
+                    player: false,
+                    dead: false,
+                },
+                Combatant {
+                    id: "goblin2".into(),
+                    entity: Entity::PLACEHOLDER,
+                    position: Vec3::ZERO,
+                    time_until_act: 0.0,
+                    bag: monster(10.0),
+                    brain: None,
+                    player: false,
+                    dead: false,
+                },
+            ],
+            actions: BTreeMap::new(),
+            result: None,
+            acting: None,
+            dying: Vec::new(),
+        };
+
+        reap_deaths(&mut battle);
+        assert!(battle.participants[1].dead, "the fallen goblin reaps");
+        assert!(!battle.participants[2].dead);
+        assert_eq!(
+            battle.result.as_deref(),
+            None,
+            "a living sibling keeps the fight going"
+        );
+
+        reap_deaths(&mut battle);
+        assert_eq!(
+            battle.dying.len(),
+            1,
+            "only the fallen goblin is settling"
+        );
+        battle.participants[2]
+            .bag
+            .insert("hp".into(), Dynamic::from(0.0));
+        reap_deaths(&mut battle);
+        assert_eq!(
+            battle.result.as_deref(),
+            Some("victory"),
+            "the last monster falling parks the fight"
+        );
+    }
+
     #[test]
     fn the_lowest_time_until_act_acts_first() {
         let battle = Battle {
@@ -1578,11 +1694,12 @@ mod tests {
         use crate::systems::ui::UiApi;
 
         let ui = UiApi::new();
+        let handle = BattleHandle::new();
         let env = ScriptEnv::new(
             crate::input::detached(),
             ui.clone(),
             crate::world_state::WorldState::default(),
-            BattleHandle::new(),
+            handle.clone(),
         );
         let brain = ActorScript::compile_with_handle(
             include_str!("../assets/scripts/battle/player_brain.rhai"),
@@ -1590,10 +1707,25 @@ mod tests {
         )
         .expect("the shipped player brain must compile");
 
+        // The field the brain reads: the hero deciding, the goblin as
+        // the only living enemy.
+        let fighter = |id: &str, hp: f64, player: bool| -> rhai::Map {
+            [
+                ("id".into(), Dynamic::from(id.to_owned())),
+                ("hp".into(), Dynamic::from(hp)),
+                ("player".into(), Dynamic::from(player)),
+                ("dead".into(), Dynamic::from(false)),
+            ]
+            .into_iter()
+            .collect()
+        };
+        handle
+            .publish_participants(vec![fighter("hero", 60.0, true), fighter("goblin", 30.0, false)]);
+
         let participant: rhai::Map = [
             ("id", Dynamic::from("hero".to_owned())),
-            ("hp", Dynamic::from(87.0)),
-            ("max_hp", Dynamic::from(100.0)),
+            ("hp", Dynamic::from(60.0)),
+            ("max_hp", Dynamic::from(60.0)),
         ]
         .into_iter()
         .map(|(k, v)| (k.into(), v))
@@ -1606,20 +1738,44 @@ mod tests {
             .unwrap();
         assert!(choice.is_unit());
 
-        // The menu declared two options; pressing cross picks Attack.
-        let nav = ui.nav().lock().unwrap_or_else(PoisonError::into_inner);
-        let mut nav = nav;
-        nav.declare("battle", 2);
-        let mut input = InputState::default();
-        input.inject(&[], &[crate::input::PadButton::Cross], &[]);
-        nav.navigate(&input);
-        drop(nav);
+        // The menu declared two options; pressing cross picks Attack —
+        // which opens target picking instead of committing.
+        let confirm = |ui: &UiApi, options: usize| {
+            let nav = ui.nav().lock().unwrap_or_else(PoisonError::into_inner);
+            let mut nav = nav;
+            nav.declare("battle", options);
+            let mut input = InputState::default();
+            input.inject(&[], &[crate::input::PadButton::Cross], &[]);
+            nav.navigate(&input);
+        };
+        confirm(&ui, 2);
 
+        let mut scope = Scope::new();
+        let choice = brain
+            .call_dynamic(&mut scope, "decide", participant.clone().into())
+            .unwrap();
+        assert!(choice.is_unit(), "attack now waits for a target");
+        assert_eq!(
+            handle.get_store("phase:hero").as_string().ok(),
+            Some("target".to_owned())
+        );
+
+        // The target list is one option (the living goblin); pressing
+        // cross commits the pair.
+        confirm(&ui, 1);
         let mut scope = Scope::new();
         let choice = brain
             .call_dynamic(&mut scope, "decide", participant.into())
             .unwrap();
-        assert_eq!(choice.into_string().unwrap(), "attack");
+        let answer = choice.try_cast::<rhai::Map>().expect("a map answer");
+        assert_eq!(
+            answer.get("action").and_then(|v| v.clone().into_string().ok()),
+            Some("attack".to_owned())
+        );
+        assert_eq!(
+            answer.get("target").and_then(|v| v.clone().into_string().ok()),
+            Some("goblin".to_owned())
+        );
     }
 
     /// The shipped attack choreography: closes in, strikes exactly
@@ -1731,7 +1887,8 @@ mod tests {
             source,
             fn_name: "goblin_decide".into(),
         };
-        let participant = participant_map("goblin", Vec3::ZERO, 0.0, &rhai::Map::new());
+        let participant =
+            participant_map("goblin", Vec3::ZERO, 0.0, &rhai::Map::new(), false, false);
         let choice = decide_with_brain(&brain, participant).unwrap().unwrap();
         assert_eq!(choice.into_string().unwrap(), "attack");
     }

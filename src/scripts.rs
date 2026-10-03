@@ -100,6 +100,9 @@ pub enum UiRequest {
         y: f32,
         w: f32,
         h: f32,
+        /// World-unit lift toward the camera, for stacked bubbles (the
+        /// command menu sits above the status panel).
+        lift: f32,
     },
     Text {
         window: String,
@@ -471,6 +474,21 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
                 y: y as f32,
                 w: w as f32,
                 h: h as f32,
+                lift: 0.0,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
+        "ui_window_lift",
+        move |name: &str, x: f64, y: f64, w: f64, h: f64, lift: f64| {
+            api.push(UiRequest::Window {
+                name: name.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                h: h as f32,
+                lift: lift as f32,
             });
         },
     );

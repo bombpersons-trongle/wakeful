@@ -19,6 +19,16 @@ fn first_foe(me) {
     ()
 }
 
+/// The named participant, alive and on the field.
+fn by_id(id) {
+    for p in battle_participants() {
+        if p.id == id && p.dead != true && p.hp > 0.0 {
+            return p;
+        }
+    }
+    ()
+}
+
 /// True on exactly the tick that crosses `beat`.
 fn crossed(state, beat) {
     state.time >= beat && state.time - state.dt < beat
@@ -64,7 +74,15 @@ fn float_text(foe, text, color) {
 }
 
 fn run(actor, state) {
-    let foe = first_foe(actor);
+    // The brain's target pick rides in on `state.target`; fall back to
+    // the first living foe when a brain answered bare.
+    let foe = ();
+    if state.target != () && state.target != "" {
+        foe = by_id(state.target);
+    }
+    if foe == () {
+        foe = first_foe(actor);
+    }
     if foe == () {
         // Nobody to hit: idle the turn away.
         return 1.0;

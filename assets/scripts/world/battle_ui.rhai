@@ -31,10 +31,18 @@ fn on_update(dt) {
         return;
     }
 
-    ui_window("battle-status", 8.0, 176.0, 192.0, 56.0);
-    let folks = battle_participants();
-    let row = 8.0;
+    // The status panel is player-side only: enemies are visible on
+    // the field, so they get no row. Height follows the party.
+    let mut folks = battle_participants();
+    let mut players = [];
     for p in folks {
+        if p.player == true {
+            players.push(p);
+        }
+    }
+    ui_window("battle-status", 8.0, 170.0, 192.0, 14.0 * players.len() + 12.0);
+    let row = 8.0;
+    for p in players {
         ui_text("battle-status", p.id, 8.0, row);
         if p.max_hp != () && p.max_hp > 0 {
             ui_bar("battle-status", 70.0, row + 2.0, 90.0, p.hp / p.max_hp);

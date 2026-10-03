@@ -199,6 +199,7 @@ pub(crate) struct UiWindow {
     w: f32,
     h: f32,
     bare: bool,
+    lift: f32,
 }
 
 /// An options list within a window; `cursor` points at the finger.
@@ -220,6 +221,7 @@ struct Pending {
     w: f32,
     h: f32,
     bare: bool,
+    lift: f32,
     content: Vec<Content>,
 }
 
@@ -261,7 +263,7 @@ fn spawn_window(commands: &mut Commands, assets: &BubbleAssets, rect: &UiWindow)
         .spawn((
             rect.clone(),
             Visibility::default(),
-            Transform::from_translation(center.extend(0.0)),
+            Transform::from_translation(center.extend(rect.lift)),
         ))
         .id();
     if !rect.bare {
@@ -469,7 +471,14 @@ pub(crate) fn drain(
                 closes.insert(name.clone());
                 pending.remove(&name);
             }
-            UiRequest::Window { name, x, y, w, h } => {
+            UiRequest::Window {
+                name,
+                x,
+                y,
+                w,
+                h,
+                lift,
+            } => {
                 closes.remove(&name);
                 pending.insert(
                     name,
@@ -479,6 +488,7 @@ pub(crate) fn drain(
                         w,
                         h,
                         bare: false,
+                        lift,
                         content: Vec::new(),
                     },
                 );
@@ -499,6 +509,7 @@ pub(crate) fn drain(
                         w: 0.0,
                         h: 0.0,
                         bare: true,
+                        lift: 0.0,
                         content: vec![Content::Text {
                             text,
                             x: 0.0,
@@ -563,6 +574,7 @@ pub(crate) fn drain(
             w: slot.w,
             h: slot.h,
             bare: slot.bare,
+            lift: slot.lift,
         };
         let root = match windows.iter().find(|(_, window)| window.name == name) {
             Some((entity, _)) => {
@@ -751,6 +763,7 @@ mod tests {
             y: 10.0,
             w: 100.0,
             h: 50.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
@@ -782,6 +795,7 @@ mod tests {
             y: 20.0,
             w: 90.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
@@ -809,6 +823,7 @@ mod tests {
             y: 0.0,
             w: 50.0,
             h: 50.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -864,6 +879,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Close {
             name: "menu".into(),
@@ -882,6 +898,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         world.run_system_once(drain).unwrap();
         assert_eq!(window_names(&mut world), vec!["menu".to_owned()]);
@@ -896,6 +913,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
@@ -914,6 +932,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Text {
             window: "menu".into(),
@@ -940,6 +959,7 @@ mod tests {
             y: 0.0,
             w: 40.0,
             h: 40.0,
+            lift: 0.0,
         });
         api.push(UiRequest::Options {
             window: "menu".into(),
@@ -976,6 +996,7 @@ mod tests {
             w: GAME_WIDTH as f32,
             h: GAME_HEIGHT as f32,
             bare: false,
+            lift: 0.0,
         };
         let assets = world.resource::<BubbleAssets>().clone();
         let mut commands = world.commands();

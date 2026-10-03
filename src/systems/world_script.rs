@@ -249,6 +249,7 @@ mod tests {
             y: 8.0,
             w: 200.0,
             h: 110.0,
+            lift: 0.0,
         }));
 
         // The engine's reconcile declares the options; the script
@@ -272,6 +273,7 @@ mod tests {
             y: 128.0,
             w: 140.0,
             h: 22.0,
+            lift: 0.0,
         }));
 
         // Circle closes everything and unfreezes the field.

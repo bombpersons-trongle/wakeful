@@ -71,7 +71,9 @@ fn challenge() {
     // The hero fights with the sheet's numbers: the roster owns them
     // (levels, gear, everything) and the battle bag just mirrors what
     // the fight needs.
-    let sheet = recall_global("sheets")["hero"];
+    let sheets = recall_global("sheets");
+    let sheet = sheets["hero"];
+    let ember = sheets["ember"];
     start_battle(
         "models/arena.glb",
         #{
@@ -88,12 +90,30 @@ fn challenge() {
                 bag: #{hp: sheet.hp, max_hp: sheet.max_hp, quick: sheet.quick},
             },
             #{
+                id: "ember",
+                player: true,
+                model: "models/character.glb",
+                position: [1.4, 0.0, 3.6],
+                facing: 180.0,
+                brain: "scripts/battle/player_brain.rhai",
+                bag: #{hp: ember.hp, max_hp: ember.max_hp, mp: ember.mp,
+                    max_mp: ember.max_mp, quick: ember.quick},
+            },
+            #{
                 id: "goblin",
                 model: "models/goblin.glb",
-                position: [0.0, 0.0, -3.0],
+                position: [-0.7, 0.0, -3.0],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
                 bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0},
+            },
+            #{
+                id: "goblin2",
+                model: "models/goblin.glb",
+                position: [0.9, 0.0, -3.6],
+                facing: 0.0,
+                brain: "scripts/battle/goblin_brain.rhai",
+                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0},
             },
         ],
     );
