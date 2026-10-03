@@ -12,9 +12,9 @@
 // battle store, keyed by participant.
 fn decide(participant) {
     // The actor's name rides in its own bubble, overlapping the top
-    // edge of the command menu (and lifted over it), so it is always
-    // clear whose turn this is.
-    ui_window_lift("battle-actor", 168.0, 160.0, 144.0, 24.0, 2.0);
+    // edge of the command menu (and lifted over it), nudged left so
+    // the two bubbles don't align edge to edge.
+    ui_window_lift("battle-actor", 150.0, 160.0, 144.0, 24.0, 2.0);
     ui_text("battle-actor", display_name(participant), 8.0, 5.0);
     // The command menu rides above the status panel: their rects
     // overlap, and equal-Z panels draw in arbitrary order.

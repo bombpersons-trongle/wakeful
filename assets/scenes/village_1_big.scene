@@ -1,0 +1,14 @@
+(
+    camera: (
+        position: (2.9955, 3.20457, 6.51585),
+        target: (-1.09468, 0.56379, -2.21895),
+        fov_degrees: 49.92558,
+    ),
+    walkable: None,
+    background: Some("backgrounds/village_1_big.png"),
+    depth_map: Some("backgrounds/village_1_big_depth.png"),
+    depth_range: 19.0,
+    pan: Some((plate: (640, 480), window: (320, 240))),
+    teleporters: [],
+    actors: [],
+)

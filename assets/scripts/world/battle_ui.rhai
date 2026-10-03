@@ -33,8 +33,8 @@ fn on_update(dt) {
 
     // The status panel is player-side only: enemies are visible on
     // the field, so they get no row. Height follows the party.
-    let mut folks = battle_participants();
-    let mut players = [];
+    let folks = battle_participants();
+    let players = [];
     for p in folks {
         if p.player == true {
             players.push(p);

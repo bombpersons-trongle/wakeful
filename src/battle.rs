@@ -1780,6 +1780,45 @@ mod tests {
 
     /// The shipped attack choreography: closes in, strikes exactly
     /// once on the damage beat, and ends with its recovery.
+    /// Syntax gates every shipped script: a parse error in any .rhai
+    /// under assets/scripts fails here, in the build, instead of
+    /// silently disabling the script in game. Behavioral coverage
+    /// stays with the per-script tests.
+    #[test]
+    fn every_shipped_script_compiles() {
+        use crate::assets::assets_root;
+        use crate::scripts::{ScriptEnv, WorldScript};
+        use crate::systems::ui::UiApi;
+
+        let root = assets_root().join("scripts");
+        let mut stack = vec![root.clone()];
+        let mut files = Vec::new();
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("the scripts tree exists") {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().and_then(|e| e.to_str()) == Some("rhai") {
+                    files.push(path);
+                }
+            }
+        }
+        assert!(files.len() >= 8, "the scripts tree went missing");
+
+        for path in files {
+            let text = std::fs::read_to_string(&path).expect("readable");
+            let env = ScriptEnv::new(
+                crate::input::detached(),
+                UiApi::new(),
+                crate::world_state::WorldState::default(),
+                BattleHandle::new(),
+            );
+            if let Err(e) = WorldScript::compile_with_handle(&text, env) {
+                panic!("{} failed to compile: {e}", path.display());
+            }
+        }
+    }
+
     #[test]
     fn the_shipped_attack_choreography_runs_in_and_strikes() {
         use crate::scripts::{ActorScript, ScriptEnv};
