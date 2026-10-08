@@ -2,3 +2,6 @@
 
 # Per-agent sidecar referenced by AGENTS.md
 AGENTS.local.md
+
+# Save files are per-playthrough local data
+/saves

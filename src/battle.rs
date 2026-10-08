@@ -1757,7 +1757,7 @@ mod tests {
             .unwrap();
         assert!(choice.is_unit(), "attack now waits for a target");
         assert_eq!(
-            handle.get_store("phase:hero").as_string().ok(),
+            handle.get_store("phase:hero").into_string().ok(),
             Some("target".to_owned())
         );
 

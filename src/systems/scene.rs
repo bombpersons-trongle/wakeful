@@ -21,15 +21,44 @@ use crate::{CurrentScene, GameCameraQuery, Ground, PendingTeleport, Player, Play
 
 /// The scene file the game loads; the editor saves back to this path via
 /// the copy stored on `CurrentScene`.
-const SCENE_PATH: &str = "scenes/devroom.scene";
+/// The scene a fresh boot plays; also what a missing/corrupt save
+/// falls back to.
+pub(crate) const DEFAULT_SCENE_PATH: &str = "scenes/devroom.scene";
 
-pub fn load_scene(mut commands: Commands, assets: Res<AssetServer>) {
+/// A scene a script picked for the next boot: the path plus, if the
+/// save restored it, where the player stands in it. Consumed by
+/// [`load_desired_scene`].
+#[derive(Clone, Debug, Resource)]
+pub(crate) struct DesiredScene {
+    pub(crate) path: String,
+    pub(crate) spawn: Option<Vec2>,
+}
+
+/// Applies a [`DesiredScene`] exactly once — the boot path into
+/// `apply_scene` (which expects `CurrentScene` + `SceneApplied` +
+/// `PlayerSpawn` already set).
+pub(crate) fn load_desired_scene(
+    mut commands: Commands,
+    assets: Res<AssetServer>,
+    desired: Option<Res<DesiredScene>>,
+) {
+    let Some(desired) = desired else {
+        return;
+    };
+    let handle = assets.load(desired.path.clone());
     commands.insert_resource(CurrentScene {
-        handle: assets.load(SCENE_PATH),
-        path: SCENE_PATH.to_string(),
+        handle,
+        path: desired.path.clone(),
     });
     commands.insert_resource(SceneApplied(false));
+    if let Some(spawn) = desired.spawn {
+        commands.insert_resource(crate::PlayerSpawn(spawn));
+    } else {
+        commands.remove_resource::<crate::PlayerSpawn>();
+    }
+    commands.remove_resource::<DesiredScene>();
 }
+
 
 /// The scene's script runtime, spawned when the scene applies and
 /// despawned with it. `entered` gates the one-shot `on_enter`.

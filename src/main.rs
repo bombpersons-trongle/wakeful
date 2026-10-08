@@ -160,6 +160,10 @@ fn main() {
     .insert_resource(crate::scripts::WorldCommands::default())
     .init_resource::<battle::PendingBattleStart>()
     .init_state::<game_state::GameState>()
+    // The game opens on the boot menu; New Game / Continue hands over
+    // to the scene.
+    .insert_state(game_state::GameState::StartMenu)
+    .insert_resource(crate::scripts::CurrentStateName::shared())
     .init_resource::<ui::UiPause>()
     .init_resource::<crate::input::InjectedInputs>()
     .insert_resource(party::Party::default())
@@ -179,7 +183,6 @@ fn main() {
             scene_loader::setup_graphics,
             world::spawn_world,
             world_script::startup,
-            scene_loader::load_scene,
         )
             .chain(),
     )
@@ -194,6 +197,8 @@ fn main() {
     .add_systems(
         Update,
         (
+            scene_loader::load_desired_scene,
+            world_script::sync_game_state,
             sys_input::quit_on_escape,
             camera::sync_camera_activation,
             screen::resize_present,

@@ -116,6 +116,17 @@ pub enum UiRequest {
         /// over dark bars, colored float labels).
         color: Option<bevy::color::Color>,
     },
+    /// An image inside a window, sized in virtual pixels. Big type is
+    /// drawn this way: the game renders text at one pixel size, so a
+    /// title ships as a bitmap.
+    Image {
+        window: String,
+        path: String,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
     /// Bare colored text at an absolute screen position — no bubble,
     /// no panel: floating damage numbers and the like. Re-issued per
     /// tick like windows; a label not re-issued disappears.
@@ -184,12 +195,18 @@ pub struct ScriptEnv {
     params: BTreeMap<String, Dynamic>,
     battle: crate::battle::BattleHandle,
     world: WorldCommands,
+    /// Shared with the engine resource the state sync writes, so
+    /// `game_state()` sees the live name.
+    state_name: CurrentStateName,
 }
 
 /// Script-requested scene operations, drained each fixed tick by the
 /// engine (Scene-gated): `warp_to` rides the same covered-point
 /// machinery as walking into a teleporter, `teleport_player`
-/// repositions within the current scene.
+/// repositions within the current scene. The boot-and-parse trio
+/// (`StartGame`/`SaveGame`) also drains here — starting reads/writes
+/// `saves/save0.ron` and flips the state to [`crate::game_state::GameState::Scene`]
+/// behind [`DesiredScene`].
 #[derive(Clone, Default, Resource)]
 pub struct WorldCommands(std::sync::Arc<std::sync::Mutex<Vec<WorldRequest>>>);
 
@@ -198,10 +215,49 @@ pub struct WorldCommands(std::sync::Arc<std::sync::Mutex<Vec<WorldRequest>>>);
 pub enum WorldRequest {
     Warp { scene: String, arrival: Vec2 },
     Teleport { position: Vec2 },
+    /// The start menu's answer: a fresh boot (store cleared, default
+    /// scene) or a restore from the save file.
+    StartGame { new_game: bool },
+    /// Write the shared store plus the player's scene and position to
+    /// the save file.
+    SaveGame,
+}
+
+/// The current [`crate::game_state::GameState`] as a short name, kept
+/// current by the engine each frame so script tiers (whose host fns
+/// cannot see the world) can read it: `game_state()`.
+#[derive(Clone, Default, Resource)]
+pub struct CurrentStateName(std::sync::Arc<std::sync::Mutex<&'static str>>);
+
+static CURRENT_STATE_NAME: std::sync::OnceLock<CurrentStateName> = std::sync::OnceLock::new();
+
+impl CurrentStateName {
+    /// The name as of the last sync: `""` before the first frame.
+    pub fn current(&self) -> &'static str {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// The process-wide instance: script host functions cannot see
+    /// resources, so every tier and the sync system share this one.
+    pub fn shared() -> Self {
+        CURRENT_STATE_NAME
+            .get_or_init(CurrentStateName::default)
+            .clone()
+    }
+
+    pub fn set(&self, name: &'static str) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = name;
+    }
 }
 
 impl WorldCommands {
-    fn push(&self, request: WorldRequest) {
+    pub(crate) fn push(&self, request: WorldRequest) {
         self.0
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -238,6 +294,7 @@ impl ScriptEnv {
             params: BTreeMap::new(),
             battle,
             world,
+            state_name: CurrentStateName::shared(),
         }
     }
 
@@ -391,8 +448,9 @@ where
 
 /// Scene operations: `warp_to` swaps scenes through the transition
 /// (the teleporter flow), `teleport_player` repositions within the
-/// current scene. Requests land in the shared [`WorldCommands`] and the
-/// engine drains them Scene-side.
+/// current scene, and the boot/parse operations (`start_game`,
+/// `save_game`) ride the same channel. Requests land in the shared
+/// [`WorldCommands`] and the engine drains them.
 fn register_world_api(engine: &mut Engine, sink: &WorldCommands) {
     {
         let sink = sink.clone();
@@ -411,6 +469,21 @@ fn register_world_api(engine: &mut Engine, sink: &WorldCommands) {
             });
         });
     }
+    {
+        let sink = sink.clone();
+        engine.register_fn("start_game", move |new_game: bool| {
+            sink.push(WorldRequest::StartGame { new_game });
+        });
+    }
+    {
+        let sink = sink.clone();
+        engine.register_fn("save_game", move || {
+            sink.push(WorldRequest::SaveGame);
+        });
+    }
+    engine.register_fn("save_exists", move || -> bool {
+        crate::systems::world_script::save_path().is_file()
+    });
 }
 
 /// Registers the party mutators every tier shares: calls append to the
@@ -601,6 +674,20 @@ fn register_ui_api(engine: &mut Engine, ui: &UiApi) {
     );
     let api = ui.clone();
     engine.register_fn(
+        "ui_image",
+        move |window: &str, path: &str, x: f64, y: f64, w: f64, h: f64| {
+            api.push(UiRequest::Image {
+                window: window.to_owned(),
+                path: path.to_owned(),
+                x: x as f32,
+                y: y as f32,
+                w: w as f32,
+                h: h as f32,
+            });
+        },
+    );
+    let api = ui.clone();
+    engine.register_fn(
         "ui_options",
         move |window: &str, x: f64, y: f64, labels: rhai::Array| {
             let labels: Vec<String> = labels
@@ -673,6 +760,7 @@ fn register_state_api(
     store: &SharedMap,
     shared: &SharedMap,
     params: &BTreeMap<String, Dynamic>,
+    state_name: &CurrentStateName,
 ) {
     let saved = store.clone();
     engine.register_fn("remember", move |key: &str, value: Dynamic| {
@@ -705,6 +793,15 @@ fn register_state_api(
             .get(key)
             .cloned()
             .unwrap_or(Dynamic::UNIT)
+    });
+    // The live state name as text: `game_state()` for gating scripts
+    // (the start menu only draws in StartMenu, say).
+    let name = state_name.clone();
+    engine.register_fn("game_state", move || -> String {
+        name.0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .to_string()
     });
     let instance_params = params.clone();
     engine.register_fn("param", move |key: &str| -> Dynamic {
@@ -752,7 +849,7 @@ impl ActorScript {
         let params = env.params.clone();
         let pose_sink = pose.clone();
         let script = CompiledScript::compile(text, |engine, source| {
-            register_state_api(engine, &store, &shared, &params);
+            register_state_api(engine, &store, &shared, &params, &env.state_name);
             register_input_api(engine, &input_sink);
             register_ui_api(engine, &ui_sink);
             register_party_api(engine, &party_sink);
@@ -928,7 +1025,7 @@ impl SceneScript {
         let params = env.params.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine, source| {
-                register_state_api(engine, &store, &shared, &params);
+                register_state_api(engine, &store, &shared, &params, &env.state_name);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
@@ -1031,7 +1128,7 @@ impl WorldScript {
         let params = env.params.clone();
         Ok(Self {
             script: CompiledScript::compile(text, |engine, source| {
-                register_state_api(engine, &store, &shared, &params);
+                register_state_api(engine, &store, &shared, &params, &env.state_name);
                 register_input_api(engine, &input_sink);
                 register_ui_api(engine, &ui_sink);
                 register_party_api(engine, &party_sink);
@@ -1057,6 +1154,34 @@ impl WorldScript {
             .lock()
             .unwrap_or_else(PoisonError::into_inner));
         Ok((result, changes))
+    }
+
+    /// Runs `on_state_change(from, to)` when the top-level game state
+    /// changes, returning any party changes the script requested. The
+    /// hook is optional: a script without one is a no-op. Windows are
+    /// declarative-persistent (they live until closed), so this is how
+    /// a script cleans up after itself — the start menu closes its
+    /// panel here.
+    pub fn on_state_change(
+        &self,
+        scope: &mut Scope,
+        from: &str,
+        to: &str,
+    ) -> Result<Vec<PartyCommand>, ScriptError> {
+        self.party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+        if !self.script.defines("on_state_change") {
+            return Ok(Vec::new());
+        }
+        let _ = self
+            .script
+            .call(scope, "on_state_change", (from.to_owned(), to.to_owned()))?;
+        Ok(std::mem::take(&mut *self
+            .party
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)))
     }
 
     /// Runs `on_update(dt)` for one fixed tick, returning any party

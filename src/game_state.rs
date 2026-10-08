@@ -1,6 +1,6 @@
-//! The game's top-level state: playing a scene, transitioning between
-//! contexts (a battle starting, a battle ending — scene warps later),
-//! or fighting a battle.
+//! The game's top-level state: the boot menu, playing a scene,
+//! transitioning between contexts (a battle starting, a battle ending
+//! — scene warps later), or fighting a battle.
 //!
 //! Systems declare which state they belong to with `run_if(in_state(..))`
 //! — the world freezes around a transition and a battle without any
@@ -13,6 +13,8 @@ use bevy::prelude::*;
 
 #[derive(States, Clone, PartialEq, Eq, Debug, Hash, Default)]
 pub(crate) enum GameState {
+    /// The boot screen: New Game / Continue. No scene is loaded yet.
+    StartMenu,
     #[default]
     Scene,
     Transition,

@@ -72,6 +72,7 @@ pub fn sync_camera_activation(
     // the capture and the closing cover, and the covered flip swaps
     // activation while the screen is fully black.
     let battle_active = match state.get() {
+        crate::game_state::GameState::StartMenu => return,
         GameState::Battle => true,
         GameState::Scene => false,
         GameState::Transition => return,

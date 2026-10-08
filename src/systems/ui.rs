@@ -30,6 +30,7 @@ const Z_PANEL_BACK: f32 = 0.5;
 const Z_PANEL_FILL: f32 = 0.55;
 /// Bar tracks sit on the panel fill — sharing its Z would z-fight.
 const Z_BAR_TRACK: f32 = 0.6;
+const Z_IMAGE: f32 = 0.7;
 const Z_TEXT: f32 = 0.9;
 const Z_CURSOR: f32 = 0.95;
 
@@ -226,12 +227,19 @@ struct Pending {
 }
 
 enum Content {
-    Text {
-        text: String,
-        x: f32,
-        y: f32,
-        color: Option<bevy::color::Color>,
-    },
+        Text {
+            text: String,
+            x: f32,
+            y: f32,
+            color: Option<bevy::color::Color>,
+        },
+        Image {
+            path: String,
+            x: f32,
+            y: f32,
+            w: f32,
+            h: f32,
+        },
     Options {
         x: f32,
         y: f32,
@@ -305,14 +313,15 @@ fn spawn_content(
     ui_assets: &UiAssets,
     theme: &BubbleTheme,
     text_assets: &TextAssets,
+    server: &AssetServer,
     rect: &UiWindow,
     root: Entity,
     content: &Content,
 ) {
     let layers = layers();
     match content {
-        Content::Text { text, x, y, color } => {
-            let (text2d, font) = pixel_text(text.clone(), text_assets);
+            Content::Text { text, x, y, color } => {
+                  let (text2d, font) = pixel_text(text.clone(), text_assets);
             let row = commands
                 .spawn((
                     text2d,
@@ -369,6 +378,22 @@ fn spawn_content(
                 y: *y,
                 cursor,
             });
+        }
+        Content::Image { path, x, y, w, h } => {
+            let sprite = commands
+                .spawn((
+                    Sprite {
+                        image: server.load(path.clone()),
+                        custom_size: Some(Vec2::new(*w, *h)),
+                        ..default()
+                    },
+                    // x/y is the image's top-left, like text.
+                    Anchor::TOP_LEFT,
+                    Transform::from_translation(local_offset(rect, *x, *y, Z_IMAGE)),
+                    layers,
+                ))
+                .id();
+            commands.entity(root).add_child(sprite);
         }
         Content::Bar { x, y, w, ratio } => {
             // Quads center on their transform, so each bar piece is
@@ -449,6 +474,7 @@ pub(crate) fn drain(
     ui_assets: Res<UiAssets>,
     theme: Res<BubbleTheme>,
     text_assets: Res<TextAssets>,
+    server: Res<AssetServer>,
 ) {
     let requests: Vec<UiRequest> = api
         .requests
@@ -531,6 +557,17 @@ pub(crate) fn drain(
                 Some(slot) => slot.content.push(Content::Text { text, x, y, color }),
                 None => warn_undeclared(&mut warned, &window),
             },
+            UiRequest::Image {
+                window,
+                path,
+                x,
+                y,
+                w,
+                h,
+            } => match pending.get_mut(&window) {
+                Some(slot) => slot.content.push(Content::Image { path, x, y, w, h }),
+                None => warn_undeclared(&mut warned, &window),
+            },
             UiRequest::Options {
                 window,
                 x,
@@ -604,6 +641,7 @@ pub(crate) fn drain(
                 &ui_assets,
                 &theme,
                 &text_assets,
+                &server,
                 &rect,
                 root,
                 content,
@@ -737,6 +775,23 @@ mod tests {
         let assets = bubble::test_assets(&mut world);
         world.insert_resource(assets);
         world.insert_resource(text::test_assets());
+        {
+            use bevy::asset::{AssetServer, AssetServerMode, UnapprovedPathMode, io::AssetSourceBuilders};
+            let mut builders = AssetSourceBuilders::default();
+            builders.init_default_source("assets", None);
+            let server = AssetServer::new(
+                std::sync::Arc::new(builders.build_sources(false, false)),
+                AssetServerMode::Unprocessed,
+                false,
+                UnapprovedPathMode::Forbid,
+            );
+            // ui_image loads through the server, so the type must be
+            // registered on it.
+            let images = Assets::<Image>::default();
+            server.register_asset(&images);
+            world.insert_resource(images);
+            world.insert_resource(server);
+        }
         world.insert_resource(UiAssets {
             cursor: Handle::default(),
         });
@@ -812,6 +867,39 @@ mod tests {
             .unwrap()
             .0;
         assert_eq!(world.get::<UiWindow>(entity).unwrap().x, 20.0);
+    }
+
+    #[test]
+    fn images_land_in_the_window_as_sized_sprites() {
+        let (mut world, api) = ui_world();
+        api.push(UiRequest::Window {
+            name: "menu".into(),
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 50.0,
+            lift: 0.0,
+        });
+        api.push(UiRequest::Image {
+            window: "menu".into(),
+            path: "ui/wakeful_title.png".into(),
+            x: 4.0,
+            y: 6.0,
+            w: 198.0,
+            h: 34.0,
+        });
+        world.run_system_once(drain).unwrap();
+        // The panel draws quads, not sprites: every sprite here is an image.
+        let mut sprites = world.query::<&Sprite>();
+        let found: Vec<Option<Vec2>> = sprites
+            .iter(&world)
+            .map(|sprite| sprite.custom_size)
+            .collect();
+        assert_eq!(
+            found,
+            vec![Some(Vec2::new(198.0, 34.0))],
+            "the image draws at its declared size"
+        );
     }
 
     #[test]
