@@ -36,3 +36,11 @@ rustyline = "18.0.1"
 # Mirrors bevy_gltf's own parser: validates the generated character model
 # without standing up the whole asset-server pipeline.
 gltf = "1.4"
+
+# The dev build was running ALL of bevy/wgpu at opt-level 0, which
+# cost ~25fps in the scene on the RX 580: the render pipeline is the
+# per-frame work, and it lives in dependencies. Optimizing deps while
+# keeping our own crate debuggable gets most of the speed without the
+# release build's rebuild times.
+[profile.dev.package."*"]
+opt-level = 2

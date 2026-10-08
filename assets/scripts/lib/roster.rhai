@@ -87,13 +87,37 @@ fn ensure_sheets() {
 /// Derived stats are recomputed from the level and the equipment every
 /// tick — leveling up changes nothing but the sheet's level and xp, so
 /// there is no per-level bookkeeping to get wrong.
+/// Recomputes each member's derived stats — but only when something
+/// that feeds them actually moved. Derived stats depend on the job,
+/// the level and the gear, never on hp/mp, so an idle tick does no
+/// work at all (this runs every tick: rebuilding every sheet on every
+/// tick was the single most expensive thing in the game).
 fn refresh_sheets() {
     let sheets = recall_global("sheets");
+    if sheets == () {
+        return;
+    }
+    let roster = recall_global("roster");
+    if roster == () {
+        return;
+    }
     let jobs = recall_global("jobs");
     let items = recall_global("items");
-    for member in recall_global("roster") {
+    let cache = recall_global("derived_cache");
+    let cache = if cache == () { #{} } else { cache };
+    let dirty = false;
+    for member in roster {
+        if sheets[member.id] == () {
+            continue;
+        }
         let sheet = sheets[member.id];
-        if sheet == () {
+        let stamp = #{
+            job: sheet.job,
+            level: sheet.level,
+            weapon: sheet.weapon,
+            armor: sheet.armor,
+        };
+        if cache[member.id] == stamp {
             continue;
         }
         let job = jobs[sheet.job];
@@ -124,8 +148,13 @@ fn refresh_sheets() {
         // rhai map indexing hands out copies — write the sheet back or
         // every change above is lost.
         sheets[member.id] = sheet;
+        cache[member.id] = stamp;
+        dirty = true;
     }
-    remember_global("sheets", sheets);
+    if dirty {
+        remember_global("derived_cache", cache);
+        remember_global("sheets", sheets);
+    }
 }
 
 /// A piece of gear adds its bonus only while it occupies the matching
