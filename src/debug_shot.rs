@@ -66,6 +66,18 @@ type DumpQueries<'w, 's> = Query<
 
 #[derive(bevy::ecs::system::SystemParam)]
 pub(crate) struct RenderDumpParams<'w, 's> {
+    /// Pending emote/pose requests, with the entity that carries them:
+    /// the animation driver only reads a request from the same entity as
+    /// its locomotion, clips and animator.
+    emote_requests: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static crate::systems::animation::EmoteRequest,
+            Option<&'static crate::systems::animation::Locomotion>,
+        ),
+    >,
     cameras:
         Query<'w, 's, (&'static Transform, &'static Projection, &'static Camera), With<Camera3d>>,
     meshes: Query<
@@ -374,6 +386,15 @@ fn state_dump<'w, 's>(
             lines.push(format!(
                 "pending {entity:?}: children={:?}",
                 peek.childrens.get(entity).map(|c| c.len())
+            ));
+        }
+        for (entity, request, locomotion) in &render.emote_requests {
+            lines.push(format!(
+                "emote_req {:?}: emote={:?} pose={:?} locomotion={}",
+                entity.index(),
+                request.emote,
+                request.pose,
+                locomotion.is_some()
             ));
         }
         for (entity, animations, animator) in &mut *characters {

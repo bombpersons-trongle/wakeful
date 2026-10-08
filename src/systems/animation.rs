@@ -268,6 +268,11 @@ pub(crate) fn resolve_pending_animations(
                 appeared: false,
                 model: pending.0.clone(),
             },
+            // The request channel: scripts, the battle sequencer and
+            // the death reaper all write emote/pose here, and the driver
+            // reads it from this same entity. Without it every emote in
+            // the game was silently dropped.
+            EmoteRequest::default(),
         ));
         if let Some(root) = model_root {
             commands.entity(root).insert(Visibility::Hidden);

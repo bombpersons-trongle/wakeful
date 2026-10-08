@@ -1128,7 +1128,7 @@ fn sequence_turn(
     // turn may come up (and the dead are reaped).
     if state.acting.is_some() {
         state.acting.as_mut().unwrap().elapsed += dt;
-        match tick_action(state, dt) {
+        match tick_action(state, dt, emote_targets) {
             Some(recovery) => {
                 let index = state.acting.as_ref().unwrap().participant;
                 state.participants[index].time_until_act += recovery;
@@ -1230,7 +1230,7 @@ fn sequence_turn(
                         home: state.participants[index].position,
                         target,
                     });
-                    if let Some(recovery) = tick_action(state, dt) {
+                    if let Some(recovery) = tick_action(state, dt, emote_targets) {
                         state.participants[index].time_until_act += recovery;
                         state.acting = None;
                         play_emotes(emote_targets, reap_deaths(state));
@@ -1302,7 +1302,15 @@ fn play_emotes(
 /// state)` returning `()` means "still running", a number ends the
 /// action with that recovery. One tick of lag on `battle_set_position`
 /// (the request drains before this) is invisible at 60hz.
-fn tick_action(state: &mut Battle, dt: f32) -> Option<f32> {
+///
+/// The choreography's `emote(..)` calls ride the script's emote sink
+/// and are handed to the fighter here - without this the fighters
+/// walked and struck but never played a clip.
+fn tick_action(
+    state: &mut Battle,
+    dt: f32,
+    emote_targets: &mut Query<&mut EmoteRequest>,
+) -> Option<f32> {
     let acting = state.acting.as_ref()?;
     let ActionBody::File { script } = &acting.body else {
         return Some(1.0);
@@ -1336,7 +1344,11 @@ fn tick_action(state: &mut Battle, dt: f32) -> Option<f32> {
         },
     );
     let mut scope = Scope::new();
-    match script.call_dynamic2(&mut scope, "run", actor.into(), state_map.into()) {
+    let called = script.call_dynamic2(&mut scope, "run", actor.into(), state_map.into());
+    if let Some(clip) = script.take_emote() {
+        play_emotes(emote_targets, vec![(c.entity, clip)]);
+    }
+    match called {
         Ok(choice) => {
             if choice.is_unit() {
                 return None;
@@ -1443,6 +1455,7 @@ mod tests {
     fn choreography_ticks_until_it_returns_a_recovery() {
         use crate::scripts::{ActorScript, ScriptEnv};
         use crate::systems::ui::UiApi;
+        use bevy::ecs::system::RunSystemOnce;
 
         let env = ScriptEnv::new(
             crate::input::detached(),
@@ -1453,7 +1466,7 @@ mod tests {
         );
         let script = std::sync::Arc::new(
             ActorScript::compile_with_handle(
-                "fn run(actor, state) { if state.time < 1.0 { () } else { 2.5 } }",
+                "fn run(actor, state) { emote(\"attack\"); if state.time < 1.0 { () } else { 2.5 } }",
                 env,
             )
             .expect("the harness choreography must compile"),
@@ -1482,14 +1495,54 @@ mod tests {
             dying: Vec::new(),
         };
 
-        battle.acting.as_mut().unwrap().elapsed = 0.2;
-        assert_eq!(tick_action(&mut battle, 1.0 / 60.0), None, "still running: parked");
-        battle.acting.as_mut().unwrap().elapsed = 1.4;
+        // The choreography's emote(..) calls land in the fighter's own
+        // EmoteRequest component - the seam that made battle actions
+        // move without ever playing a clip.
+        let mut world = World::new();
+        let fighter = world.spawn(EmoteRequest::default()).id();
+        battle.participants[0].entity = fighter;
+        world.insert_resource(battle);
+        world.insert_resource(Recovery(None));
+
+        world.run_system_once(tick_once).unwrap();
         assert_eq!(
-            tick_action(&mut battle, 1.0 / 60.0),
+            world.resource::<Recovery>().0,
+            None,
+            "still running: parked"
+        );
+
+        set_elapsed(&mut world, 1.4);
+        world.run_system_once(tick_once).unwrap();
+        assert_eq!(
+            world.resource::<Recovery>().0,
             Some(2.5),
             "the returned number is the recovery"
         );
+        assert_eq!(
+            world.get::<EmoteRequest>(fighter).unwrap().emote.as_deref(),
+            Some("attack"),
+            "the choreography's emote(..) reaches the fighter's request"
+        );
+    }
+
+    /// What the last choreography tick returned.
+    #[derive(Resource)]
+    struct Recovery(Option<f64>);
+
+    /// Moves the acting choreography's clock forward without running it.
+    fn set_elapsed(world: &mut World, elapsed: f32) {
+        let mut battle = world.remove_resource::<Battle>().unwrap();
+        battle.acting.as_mut().unwrap().elapsed = elapsed;
+        world.insert_resource(battle);
+    }
+
+    /// One choreography tick, with the recovery reported out.
+    fn tick_once(
+        mut battle: ResMut<Battle>,
+        mut requests: Query<&mut EmoteRequest>,
+        mut recovery: ResMut<Recovery>,
+    ) {
+        recovery.0 = tick_action(&mut battle, 1.0 / 60.0, &mut requests).map(|r| r as f64);
     }
 
     /// Deaths reap after an action: the die clip plays, the corpse

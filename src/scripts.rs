@@ -938,6 +938,16 @@ impl ActorScript {
         *self.waiting.lock().unwrap_or_else(PoisonError::into_inner) = waiting;
     }
 
+    /// Takes the clip the script asked to play this tick (`emote(..)`),
+    /// if any. Battle choreography scripts run per tick and their poses
+    /// have to reach the fighter's emote request the same way.
+    pub fn take_emote(&self) -> Option<String> {
+        self.emote
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
     /// Calls a named entry point with one `Dynamic` argument; how the
     /// battle engine asks a brain file what its participant does.
     pub fn call_dynamic(
