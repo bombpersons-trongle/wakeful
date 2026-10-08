@@ -89,6 +89,18 @@ fn run(actor, state) {
         step_toward(actor, state, #{ x: state.home[0], z: state.home[1] }, 3.5);
         ()
     } else {
-        1.4
+        recovery(actor)
     }
+}
+
+// The turn's recovery: the base beat, scaled by the actor's Quick
+// from the sheet (the stat shifts the denominator: 100/(100+quick)).
+fn recovery(actor) {
+    let base = 1.4;
+    let quick = 0.0;
+    let sheets = recall_global("sheets");
+    if sheets != () && sheets[actor.id] != () && sheets[actor.id].quick != () {
+        quick = sheets[actor.id].quick;
+    }
+    base * 100.0 / (100.0 + quick)
 }

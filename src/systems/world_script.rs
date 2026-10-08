@@ -641,6 +641,13 @@ pub(crate) fn drain_world_commands(
                 });
                 next_state.set(crate::game_state::GameState::Scene);
             }
+            crate::scripts::WorldRequest::ResetToStartMenu => {
+                if let Some(shared) = &shared {
+                    *shared.shared().lock().unwrap_or_else(PoisonError::into_inner) =
+                        Default::default();
+                }
+                next_state.set(crate::game_state::GameState::StartMenu);
+            }
             crate::scripts::WorldRequest::SaveGame => {
                 let (Some(current), Some(shared)) = (current.as_ref(), shared.as_ref()) else {
                     warn!("save_game: nothing to save yet");
@@ -840,6 +847,250 @@ mod state_change_tests {
 }
 
 #[cfg(test)]
+mod outro_tests {
+    use super::*;
+    use crate::battle::BattleHandle;
+    use crate::input::{InputState, PadButton};
+    use bevy::ecs::system::RunSystemOnce;
+    use crate::scripts::{ScriptEnv, WorldScript as WorldScriptRuntime};
+    use crate::systems::ui::{UiApi, UiRequest};
+
+    /// A world + compiled battle HUD ready to tick, with the battle
+    /// parked on `result` and the given participants on the field.
+    fn hud(
+        result: &str,
+        participants: Vec<rhai::Map>,
+    ) -> (
+        World,
+        WorldScriptRuntime,
+        Scope<'static>,
+        UiApi,
+        BattleHandle,
+        crate::world_state::WorldState,
+        crate::scripts::WorldCommands,
+    ) {
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
+        let state = crate::world_state::WorldState::default();
+        let handle = BattleHandle::new();
+        handle.set_active(true);
+        handle.set_result(Some(result.to_owned()));
+        handle.publish_participants(participants);
+        let api = UiApi::new();
+        let world_commands = crate::scripts::WorldCommands::default();
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            api.clone(),
+            state.clone(),
+            handle.clone(),
+            world_commands.clone(),
+        );
+        let runtime = WorldScriptRuntime::compile_with_handle(
+            include_str!("../../assets/scripts/world/battle_ui.rhai"),
+            env,
+        )
+        .expect("the shipped battle HUD must compile");
+        (world, runtime, Scope::new(), api, handle, state, world_commands)
+    }
+
+    fn participant(id: &str, player: bool, hp: f64, extra: rhai::Map) -> rhai::Map {
+        let mut map: rhai::Map = [
+            ("id".into(), rhai::Dynamic::from(id.to_owned())),
+            ("player".into(), rhai::Dynamic::from(player)),
+            ("hp".into(), rhai::Dynamic::from(hp)),
+            ("x".into(), rhai::Dynamic::from(0.0)),
+            ("z".into(), rhai::Dynamic::from(0.0)),
+        ]
+        .into_iter()
+        .collect();
+        for (key, value) in extra {
+            map.insert(key, value);
+        }
+        map
+    }
+
+    /// A tick with a cross confirmed on the `outro` menu.
+    fn confirm_in(world: &mut World, api: &UiApi, menu: &str) {
+        api.nav()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .declare(menu, 1);
+        let mut input = InputState::default();
+        input.inject(&[], &[PadButton::Cross], &[]);
+        api.nav()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .navigate(&input);
+        world.run_system_once(run_world_scripts).unwrap();
+    }
+
+    #[test]
+    fn victory_pays_xp_writes_vitals_and_ends_the_battle() {
+        // The real roster script bootstraps the sheets, so the outro
+        // writes into well-formed ones.
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(crate::systems::party::Party::default());
+        let state = crate::world_state::WorldState::default();
+        world.insert_resource(state.clone());
+        let handle = BattleHandle::new();
+        handle.publish_participants(vec![
+            participant("hero", true, 40.0, rhai::Map::new()),
+            participant("ember", true, 42.0, rhai::Map::new()),
+            participant(
+                "goblin",
+                false,
+                0.0,
+                [("xp".into(), rhai::Dynamic::from(25.0))]
+                    .into_iter()
+                    .collect(),
+            ),
+            participant(
+                "goblin2",
+                false,
+                0.0,
+                [("xp".into(), rhai::Dynamic::from(18.0))]
+                    .into_iter()
+                    .collect(),
+            ),
+        ]);
+        let api = UiApi::new();
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            api.clone(),
+            state.clone(),
+            handle.clone(),
+            crate::scripts::WorldCommands::default(),
+        );
+        let roster =
+            WorldScriptRuntime::compile_with_handle(
+                include_str!("../../assets/scripts/world/roster.rhai"),
+                env.clone(),
+            )
+            .expect("the roster script must compile");
+        let hud = WorldScriptRuntime::compile_with_handle(
+            include_str!("../../assets/scripts/world/battle_ui.rhai"),
+            env,
+        )
+        .expect("the shipped battle HUD must compile");
+        world.spawn(WorldScript {
+            path: "scripts/world/roster.rhai".into(),
+            runtime: roster,
+            scope: Scope::new(),
+        });
+        let hud_entity = world
+            .spawn(WorldScript {
+                path: "scripts/world/battle_ui.rhai".into(),
+                runtime: hud,
+                scope: Scope::new(),
+            })
+            .id();
+        world.run_system_once(run_world_scripts).unwrap();
+        world.run_system_once(run_world_scripts).unwrap();
+        assert!(
+            world.get::<ScriptBroken>(hud_entity).is_none(),
+            "the HUD keeps running while the roster bootstraps"
+        );
+
+        // The fight ends.
+        handle.set_active(true);
+        handle.set_result(Some("victory".to_owned()));
+        world.run_system_once(run_world_scripts).unwrap();
+        let requests = api.take_requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, UiRequest::Text { text, .. } if text.contains("Victory"))),
+            "the outro announces the win"
+        );
+
+        // Confirm: xp lands on the sheets (43 split between two
+        // survivors), the hero's wounds are recorded, and the engine
+        // gets the exit request.
+        confirm_in(&mut world, &api, "outro");
+        world.run_system_once(run_world_scripts).unwrap();
+
+        // The battle can take ticks to actually end; until then the HUD
+        // keeps ticking and must NOT bring the screen back (windows
+        // live until closed).
+        let after = api.take_requests();
+        assert!(
+            !after
+                .iter()
+                .any(|r| matches!(r, UiRequest::Window { name, .. } if name == "outro")),
+            "the settled outro does not re-declare itself"
+        );
+
+        let store = state.shared();
+        let shared = store.lock().unwrap_or_else(PoisonError::into_inner);
+        let sheets = shared.get("sheets").cloned().expect("sheets");
+        let map = sheets.clone().try_cast::<rhai::Map>().expect("sheets map");
+        let hero = map.get("hero").cloned().expect("hero sheet");
+        let hero = hero.clone().try_cast::<rhai::Map>().expect("sheet map");
+        let number = |key: &str| {
+            hero.get(key)
+                .cloned()
+                .and_then(|v| v.try_cast::<f64>())
+                .unwrap_or_default()
+        };
+        assert!(
+            (number("xp") - 21.5).abs() < 1e-6,
+            "43 xp split between two survivors, got {}",
+            number("xp")
+        );
+        assert_eq!(number("hp"), 40.0, "the fight's wounds land on the sheet");
+        drop(shared);
+        assert!(
+            handle.take_requests().iter().any(|r| matches!(
+                r,
+                crate::battle::BattleRequest::End { .. }
+            )),
+            "victory hands the fight back to the engine"
+        );
+    }
+
+    #[test]
+    fn defeat_asks_for_the_title_screen() {
+        let (mut world, runtime, scope, api, _handle, _state, commands) = hud(
+            "defeat",
+            vec![
+                participant("hero", true, 0.0, rhai::Map::new()),
+                participant(
+                    "goblin",
+                    false,
+                    12.0,
+                    [("xp".into(), rhai::Dynamic::from(25.0))]
+                        .into_iter()
+                        .collect(),
+                ),
+            ],
+        );
+        world.spawn(WorldScript {
+            path: "scripts/world/battle_ui.rhai".into(),
+            runtime,
+            scope,
+        });
+        world.run_system_once(run_world_scripts).unwrap();
+        let requests = api.take_requests();
+        assert!(
+            requests
+                .iter()
+                .any(|r| matches!(r, UiRequest::Text { text, .. } if text.contains("Game Over"))),
+            "the defeat screen names the loss"
+        );
+        confirm_in(&mut world, &api, "outro");
+        assert!(
+            commands
+                .take()
+                .iter()
+                .any(|r| matches!(r, crate::scripts::WorldRequest::ResetToStartMenu)),
+            "the confirm asks the engine for the title screen"
+        );
+    }
+}
+
+#[cfg(test)]
 mod start_game_tests {
     use super::*;
     use bevy::ecs::system::RunSystemOnce;
@@ -898,6 +1149,36 @@ mod start_game_tests {
     }
 
     /// Continue restores the store, the scene, and the saved spot.
+    #[test]
+    fn a_defeat_reset_clears_the_store_and_goes_to_the_menu() {
+        let mut world = boot_world(crate::game_state::GameState::Battle);
+        let state = crate::world_state::WorldState::default();
+        world.insert_resource(state.clone());
+        state
+            .shared()
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert("sheets".into(), Dynamic::from("dirty"));
+        queued(&mut world, WorldRequest::ResetToStartMenu);
+        world.run_system_once(drain_world_commands).unwrap();
+
+        assert!(
+            state
+                .shared()
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .is_empty(),
+            "a defeat wipes the store: fresh sheets, fresh flags"
+        );
+        assert!(
+            matches!(
+                world.resource::<NextState<crate::game_state::GameState>>(),
+                NextState::Pending(crate::game_state::GameState::StartMenu)
+            ),
+            "the title screen is where a defeat lands"
+        );
+    }
+
     #[test]
     fn continue_restores_store_scene_and_position() {
         let mut world = boot_world(crate::game_state::GameState::StartMenu);

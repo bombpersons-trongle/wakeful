@@ -149,6 +149,34 @@ fn gear_bonus(items, sheet, stat) {
 
 /// The battle posts {id, amount} entries; each becomes xp on the
 /// sheet, and levels follow the curve while there is xp left over.
+/// Writes a battle's outcome back onto a sheet: the vitals the
+/// fighter ended the fight with (clamped to the sheet's maxima), so
+/// damage carries between battles. Unowned ids are ignored.
+fn set_vitals(id, hp, mp) {
+    let sheets = recall_global("sheets");
+    if sheets == () || sheets[id] == () {
+        return;
+    }
+    let sheet = sheets[id];
+    sheet.hp = clamp(hp, 0.0, sheet.max_hp);
+    if sheet.max_mp != () {
+        sheet.mp = clamp(mp, 0.0, sheet.max_mp);
+    }
+    sheets[id] = sheet;
+    remember_global("sheets", sheets);
+}
+
+/// Keeps a number inside [lo, hi].
+fn clamp(value, lo, hi) {
+    if value < lo {
+        lo
+    } else if value > hi {
+        hi
+    } else {
+        value
+    }
+}
+
 fn process_xp() {
     // Level cap. (Script-top-level consts never run when only a
     // function is called, so the cap lives here.)

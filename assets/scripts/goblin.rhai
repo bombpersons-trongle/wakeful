@@ -105,7 +105,7 @@ fn challenge() {
                 position: [-0.7, 0.0, -3.0],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0},
+                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0, xp: 25.0},
             },
             #{
                 id: "goblin2",
@@ -113,7 +113,7 @@ fn challenge() {
                 position: [0.9, 0.0, -3.6],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0},
+                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0, xp: 18.0},
             },
         ],
     );

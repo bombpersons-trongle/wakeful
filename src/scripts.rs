@@ -221,6 +221,9 @@ pub enum WorldRequest {
     /// Write the shared store plus the player's scene and position to
     /// the save file.
     SaveGame,
+    /// Wipe the shared store and return to the boot menu — what a
+    /// defeat's confirm does.
+    ResetToStartMenu,
 }
 
 /// The current [`crate::game_state::GameState`] as a short name, kept
@@ -479,6 +482,12 @@ fn register_world_api(engine: &mut Engine, sink: &WorldCommands) {
         let sink = sink.clone();
         engine.register_fn("save_game", move || {
             sink.push(WorldRequest::SaveGame);
+        });
+    }
+    {
+        let sink = sink.clone();
+        engine.register_fn("reset_to_start_menu", move || {
+            sink.push(WorldRequest::ResetToStartMenu);
         });
     }
     engine.register_fn("save_exists", move || -> bool {
