@@ -158,6 +158,19 @@ def attack(t):
     }
 C["attack"] = clip_oneshot(0.9, 54, attack)
 
+# Casting: both arms rise, palms out, and the body leans back into it
+# — the held pose a spell resolves out of. Arms only (no hips), so the
+# engine's locomotion keeps control of the body while the cast plays.
+def cast(t):
+    raise_e = eased([(0.0, 0.0), (0.35, 1.0), (0.75, 1.0), (1.0, 0.0)], t)
+    return {
+        "arm_r": {"r": (0, -110 * DEG * raise_e, -25 * DEG * raise_e)},
+        "arm_l": {"r": (0, 110 * DEG * raise_e, 25 * DEG * raise_e)},
+        "torso": {"r": (eased([(0.0, 0.0), (0.35, -14), (0.75, -14), (1.0, 0.0)], t) * DEG, 0, 0)},
+        "head": {"r": (eased([(0.0, 0.0), (0.35, 12), (0.75, 12), (1.0, 0.0)], t) * DEG, 0, 0)},
+    }
+C["cast"] = clip_oneshot(1.2, 40, cast)
+
 # Death reads as sinking into the ground: the hips translate down
 # until the whole body is below the floor, and the clip HOLDS there.
 # Two constraints shaped this:

@@ -166,6 +166,28 @@ fn set_vitals(id, hp, mp) {
     remember_global("sheets", sheets);
 }
 
+/// A spell's definition (power, cost) by name, searched across the
+/// job tables: spells are DATA, and every caster - menu, choreography
+/// or debug console - looks them up the same way.
+fn spell(name) {
+    let jobs = recall_global("jobs");
+    if jobs == () {
+        return ();
+    }
+    for job_name in jobs.keys() {
+        let job = jobs[job_name];
+        if job.spells == () {
+            continue;
+        }
+        for s in job.spells {
+            if s.name == name {
+                return s;
+            }
+        }
+    }
+    ()
+}
+
 /// Keeps a number inside [lo, hi].
 fn clamp(value, lo, hi) {
     if value < lo {

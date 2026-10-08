@@ -68,6 +68,9 @@ fn challenge() {
     // the damage lands on the strike beat (see the file's header).
     battle_action_file("attack", "scripts/battle/attack_weapon.rhai");
     battle_action("flee", "flee_action");
+    // Spells are data in the roster; this is the one choreography that
+    // casts any of them (the menu stores which spell was chosen).
+    battle_action_file("cast", "scripts/battle/cast_spell.rhai");
     // The hero fights with the sheet's numbers: the roster owns them
     // (levels, gear, everything) and the battle bag just mirrors what
     // the fight needs.
@@ -105,7 +108,7 @@ fn challenge() {
                 position: [-0.7, 0.0, -3.0],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0, xp: 25.0},
+                bag: #{hp: 30.0, max_hp: 30.0, quick: 4.0, mdef: 4.0, xp: 25.0},
             },
             #{
                 id: "goblin2",
@@ -113,7 +116,7 @@ fn challenge() {
                 position: [0.9, 0.0, -3.6],
                 facing: 0.0,
                 brain: "scripts/battle/goblin_brain.rhai",
-                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0, xp: 18.0},
+                bag: #{hp: 24.0, max_hp: 24.0, quick: 3.0, mdef: 3.0, xp: 18.0},
             },
         ],
     );

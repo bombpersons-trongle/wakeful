@@ -71,8 +71,8 @@ fn assert_valid_model(name: &str, bytes: &[u8]) -> (gltf::Document, Vec<gltf::bu
 const RIG_JOINTS: [&str; 8] = [
     "hips", "torso", "head", "hair", "arm_l", "arm_r", "leg_l", "leg_r",
 ];
-const CLIPS: [&str; 8] = [
-    "idle", "walk", "run", "pick_up", "shrug", "wave", "attack", "die",
+const CLIPS: [&str; 9] = [
+    "idle", "walk", "run", "pick_up", "shrug", "wave", "attack", "cast", "die",
 ];
 
 /// The goblin ships the same rig and clip set as the hero — the battle
@@ -108,6 +108,25 @@ fn the_attack_clip_sells_a_swing() {
         "attack must animate; a constant clip plays as one frame"
     );
 }
+/// `cast` is what a spell plays: it must animate (a constant clip
+/// would read as a single frozen frame) and stay inside the arms and
+/// torso, never the hips — locomotion owns those.
+#[test]
+fn the_cast_clip_raises_both_arms() {
+    let (document, buffers) = assert_valid_model(
+        "character.glb",
+        include_bytes!("../assets/models/character.glb"),
+    );
+    let cast = document
+        .animations()
+        .find(|a| a.name() == Some("cast"))
+        .expect("cast clip");
+    assert!(
+        clip_moves_a_joint(&document, &buffers, &cast),
+        "cast must animate; a constant clip plays as one frame"
+    );
+}
+
 /// `die` is the battle flow's death animation: it must END with the
 /// body sunk below the floor (hips translated down), and it must not
 /// touch scale — a scale-0 death would stick after the clip stops

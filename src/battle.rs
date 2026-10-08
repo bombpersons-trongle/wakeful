@@ -1821,6 +1821,329 @@ mod tests {
         }
     }
 
+    /// The action menu is data: a mage's spells show up (only the
+    /// ones she can pay for), a fighter's do not.
+    /// The cast choreography's beats: the mp is paid once at the
+    /// opening, the magic lands on the strike beat (magic x2 + power -
+    /// the target's magic defence, rolled a tenth either way), and a
+    /// caster without the mp says so instead of casting.
+    fn actor_map(id: &str) -> Dynamic {
+        [
+            ("id".into(), Dynamic::from(id.to_owned())),
+            ("hp".into(), Dynamic::from(42.0)),
+            ("mp".into(), Dynamic::from(3.0)),
+            ("x".into(), Dynamic::from(0.0)),
+            ("y".into(), Dynamic::from(0.0)),
+            ("z".into(), Dynamic::from(2.0)),
+        ]
+        .into_iter()
+        .collect::<rhai::Map>()
+        .into()
+    }
+
+    #[test]
+    fn the_shipped_cast_spends_mp_and_lands_the_magic() {
+        use crate::scripts::{ActorScript, ScriptEnv};
+        use crate::systems::ui::UiApi;
+
+        let handle = BattleHandle::new();
+        let state = crate::world_state::WorldState::default();
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            UiApi::new(),
+            state.clone(),
+            handle.clone(),
+            crate::scripts::WorldCommands::default(),
+        );
+        let cast = ActorScript::load("scripts/battle/cast_spell.rhai", env)
+            .expect("the shipped cast must compile");
+        // Ember (magic 11) casting fire (power 10) at a goblin on 4
+        // mdef: 10 + 22 - 4 = 28, rolled within a tenth.
+        let sheet = |magic: f64, quick: f64| -> Dynamic {
+            [
+                ("magic".into(), Dynamic::from(magic)),
+                ("quick".into(), Dynamic::from(quick)),
+            ]
+            .into_iter()
+            .collect::<rhai::Map>()
+            .into()
+        };
+        let map = |pairs: Vec<(&str, Dynamic)>| -> Dynamic {
+            let mut built = rhai::Map::new();
+            for (key, value) in pairs {
+                built.insert(key.into(), value);
+            }
+            Dynamic::from(built)
+        };
+        let list = |items: Vec<Dynamic>| -> Dynamic { Dynamic::from(items) };
+        let fire = map(vec![
+            ("name", Dynamic::from("fire".to_owned())),
+            ("level", Dynamic::from(1_i64)),
+            ("power", Dynamic::from(10.0)),
+            ("cost", Dynamic::from(8.0)),
+        ]);
+        {
+            let store = state.shared();
+            let mut shared = store.lock().unwrap();
+            shared.insert(
+                "jobs".into(),
+                map(vec![("mage", map(vec![("spells", list(vec![fire]))]))]),
+            );
+            shared.insert(
+                "sheets".into(),
+                map(vec![
+                    ("ember", sheet(11.0, 6.0)),
+                    ("goblin", sheet(0.0, 3.0)),
+                ]),
+            );
+        }
+        handle.set_store("spell", Dynamic::from("fire".to_owned()));
+        handle.set_store("bag:ember:mp", Dynamic::from(20.0));
+        handle.set_store("bag:goblin:hp", Dynamic::from(30.0));
+        handle.set_store("bag:goblin:mdef", Dynamic::from(4.0));
+        let fighter = |id: &str, hp: f64, mp: Option<f64>| -> rhai::Map {
+            let mut map: rhai::Map = [
+                ("id".into(), Dynamic::from(id.to_owned())),
+                ("hp".into(), Dynamic::from(hp)),
+                ("player".into(), Dynamic::from(id == "ember")),
+                ("dead".into(), Dynamic::from(false)),
+                ("x".into(), Dynamic::from(0.0)),
+                ("y".into(), Dynamic::from(0.0)),
+                ("z".into(), Dynamic::from(-2.0)),
+            ]
+            .into_iter()
+            .collect();
+            if let Some(mp) = mp {
+                map.insert("mp".into(), Dynamic::from(mp));
+            }
+            map
+        };
+        handle.publish_participants(vec![fighter("ember", 42.0, Some(20.0)), fighter("goblin", 30.0, None)]);
+
+        let actor: rhai::Map = [
+            ("id".into(), Dynamic::from("ember".to_owned())),
+            ("hp".into(), Dynamic::from(42.0)),
+            ("mp".into(), Dynamic::from(20.0)),
+            ("x".into(), Dynamic::from(0.0)),
+            ("y".into(), Dynamic::from(0.0)),
+            ("z".into(), Dynamic::from(2.0)),
+        ]
+        .into_iter()
+        .collect();
+        let state_map = |time: f64| -> rhai::Map {
+            [
+                ("time".into(), Dynamic::from(time)),
+                ("dt".into(), Dynamic::from(0.05)),
+                ("pos".into(), Dynamic::from(vec![0.0, 0.0, 2.0])),
+                ("home".into(), Dynamic::from(vec![0.0, 2.0])),
+                ("target".into(), Dynamic::from("goblin".to_owned())),
+            ]
+            .into_iter()
+            .collect()
+        };
+
+        // Opening: the pose starts and the mp is paid - once.
+        cast.call_dynamic2(&mut Scope::new(), "run", actor.clone().into(), state_map(0.02).into())
+            .unwrap();
+        assert_eq!(
+            handle.get_store("bag:ember:mp").try_cast::<f64>(),
+            Some(12.0),
+            "fire costs 8 of her 20 mp"
+        );
+        cast.call_dynamic2(&mut Scope::new(), "run", actor.clone().into(), state_map(0.30).into())
+            .unwrap();
+        assert_eq!(
+            handle.get_store("bag:ember:mp").try_cast::<f64>(),
+            Some(12.0),
+            "the cost is paid once, not per tick"
+        );
+
+        // The strike beat: magic lands.
+        cast.call_dynamic2(&mut Scope::new(), "run", actor.clone().into(), state_map(0.90).into())
+            .unwrap();
+        let hp = handle
+            .get_store("bag:goblin:hp")
+            .try_cast::<f64>()
+            .expect("hp is a number");
+        let dealt = 30.0 - hp;
+        assert!(
+            (25.2..=30.8).contains(&dealt),
+            "28 magic within a tenth, dealt {dealt}"
+        );
+
+        // Past the strike: no double damage.
+        cast.call_dynamic2(&mut Scope::new(), "run", actor.clone().into(), state_map(1.20).into())
+            .unwrap();
+        assert_eq!(
+            handle.get_store("bag:goblin:hp").try_cast::<f64>().unwrap(),
+            hp,
+            "the magic lands once"
+        );
+
+        // Done: a recovery, Quick-scaled.
+        let done = cast
+            .call_dynamic2(&mut Scope::new(), "run", actor.into(), state_map(1.50).into())
+            .unwrap();
+        let recovery = done.try_cast::<f64>().expect("a recovery number");
+        assert!(
+            (1.1..1.3).contains(&recovery),
+            "1.2 base, scaled by her quick of 6: {recovery}"
+        );
+
+        // Out of mp: she says so and the turn ends without magic.
+        handle.set_store("bag:ember:mp", Dynamic::from(3.0));
+        handle.set_store("bag:goblin:hp", Dynamic::from(30.0));
+        let refused = cast
+            .call_dynamic2(&mut Scope::new(), "run", actor_map("ember"), state_map(0.02).into())
+            .unwrap();
+        assert_eq!(
+            refused.try_cast::<f64>(),
+            Some(0.6),
+            "a refused cast spends the turn right there"
+        );
+        assert_eq!(
+            handle.get_store("bag:goblin:hp").try_cast::<f64>().unwrap(),
+            30.0,
+            "no magic without the mp"
+        );
+    }
+
+    #[test]
+    fn the_shipped_menu_lists_the_spells_the_sheet_grants() {
+        use crate::scripts::{ActorScript, ScriptEnv};
+        use crate::systems::ui::UiApi;
+
+        let ui = UiApi::new();
+        let handle = BattleHandle::new();
+        let state = crate::world_state::WorldState::default();
+        let env = ScriptEnv::new(
+            crate::input::detached(),
+            ui.clone(),
+            state.clone(),
+            handle.clone(),
+            crate::scripts::WorldCommands::default(),
+        );
+        let brain = ActorScript::compile_with_handle(
+            include_str!("../assets/scripts/battle/player_brain.rhai"),
+            env,
+        )
+        .expect("the shipped player brain must compile");
+
+        // The roster's defs plus sheets at the level that grants fire.
+        let map = |pairs: Vec<(&str, Dynamic)>| -> Dynamic {
+            let mut built = rhai::Map::new();
+            for (key, value) in pairs {
+                built.insert(key.into(), value);
+            }
+            Dynamic::from(built)
+        };
+        let list = |items: Vec<Dynamic>| -> Dynamic { Dynamic::from(items) };
+        let spell_def = |name: &str, level: i64, power: f64, cost: f64| -> Dynamic {
+            map(vec![
+                ("name", Dynamic::from(name.to_owned())),
+                ("level", Dynamic::from(level)),
+                ("power", Dynamic::from(power)),
+                ("cost", Dynamic::from(cost)),
+            ])
+        };
+        {
+            let store = state.shared();
+            let mut shared = store.lock().unwrap();
+            shared.insert(
+                "jobs".into(),
+                map(vec![
+                    (
+                        "fighter",
+                        map(vec![("spells", list(vec![]))]),
+                    ),
+                    (
+                        "mage",
+                        map(vec![(
+                            "spells",
+                            list(vec![
+                                spell_def("fire", 1, 10.0, 8.0),
+                                spell_def("ice", 3, 15.0, 12.0),
+                            ]),
+                        )]),
+                    ),
+                ]),
+            );
+            shared.insert(
+                "sheets".into(),
+                map(vec![
+                    ("hero", map(vec![("spells", list(vec![]))])),
+                    (
+                        "ember",
+                        map(vec![(
+                            "spells",
+                            list(vec![Dynamic::from("fire".to_owned())]),
+                        )]),
+                    ),
+                ]),
+            );
+        }
+
+        let mut scope = Scope::new();
+        let mage: Dynamic = [
+            ("id".into(), Dynamic::from("ember".to_owned())),
+            ("hp".into(), Dynamic::from(42.0)),
+            ("mp".into(), Dynamic::from(20.0)),
+        ]
+        .into_iter()
+        .collect::<rhai::Map>()
+        .into();
+        // Offered: Attack / fire / Flee - ice is above her level.
+        brain.call_dynamic(&mut scope, "decide", mage).unwrap();
+        let labels = ui
+            .take_requests()
+            .into_iter()
+            .find_map(|r| match r {
+                crate::scripts::UiRequest::Options { labels, .. } => Some(labels),
+                _ => None,
+            })
+            .expect("the menu declares its options");
+        assert_eq!(labels, vec!["Attack", "fire", "Flee"]);
+
+        // The fighter sees only the basics.
+        let fighter: Dynamic = [
+            ("id".into(), Dynamic::from("hero".to_owned())),
+            ("hp".into(), Dynamic::from(60.0)),
+        ]
+        .into_iter()
+        .collect::<rhai::Map>()
+        .into();
+        brain.call_dynamic(&mut scope, "decide", fighter).unwrap();
+        let labels = ui
+            .take_requests()
+            .into_iter()
+            .find_map(|r| match r {
+                crate::scripts::UiRequest::Options { labels, .. } => Some(labels),
+                _ => None,
+            })
+            .expect("the menu declares its options");
+        assert_eq!(labels, vec!["Attack", "Flee"]);
+
+        // Out of mp: the spell drops out of the menu.
+        let broke: Dynamic = [
+            ("id".into(), Dynamic::from("ember".to_owned())),
+            ("hp".into(), Dynamic::from(42.0)),
+            ("mp".into(), Dynamic::from(2.0)),
+        ]
+        .into_iter()
+        .collect::<rhai::Map>()
+        .into();
+        brain.call_dynamic(&mut scope, "decide", broke).unwrap();
+        let labels = ui
+            .take_requests()
+            .into_iter()
+            .find_map(|r| match r {
+                crate::scripts::UiRequest::Options { labels, .. } => Some(labels),
+                _ => None,
+            })
+            .expect("the menu declares its options");
+        assert_eq!(labels, vec!["Attack", "Flee"], "fire costs 8 mp");
+    }
+
     #[test]
     fn the_shipped_attack_choreography_runs_in_and_strikes() {
         use crate::scripts::{ActorScript, ScriptEnv};

@@ -794,6 +794,21 @@ fn register_state_api(
             .unwrap_or_else(PoisonError::into_inner)
             .insert(key.to_owned(), value);
     });
+    {
+        // Damage and spells roll their variance in script: `roll(0.1)`
+        // is "within ten percent, either way".
+        let seed = std::sync::Mutex::new(0x2545_F491_4F6C_DD1Du64);
+        engine.register_fn("roll", move |fraction: f64| -> f64 {
+            let mut seed = seed.lock().unwrap_or_else(PoisonError::into_inner);
+            // xorshift64*: deterministic, no dependency, good enough
+            // for a damage wobble.
+            *seed ^= *seed << 13;
+            *seed ^= *seed >> 7;
+            *seed ^= *seed << 17;
+            let unit = (*seed >> 11) as f64 / (1u64 << 53) as f64;
+            unit * 2.0 * fraction - fraction
+        });
+    }
     let global = shared.clone();
     engine.register_fn("recall_global", move |key: &str| -> Dynamic {
         global
