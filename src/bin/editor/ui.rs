@@ -159,7 +159,15 @@ pub fn panels(
         &mut exit,
     );
     if dialog.open {
-        open_dialog(ctx, &scenes, &assets, &mut open, &mut shown, &mut selected, &mut dialog);
+        open_dialog(
+            ctx,
+            &scenes,
+            &assets,
+            &mut open,
+            &mut shown,
+            &mut selected,
+            &mut dialog,
+        );
     }
     if dialog.save_as {
         save_as_dialog(
@@ -176,14 +184,7 @@ pub fn panels(
     let Some(scene) = working.0.as_mut() else {
         return;
     };
-    actor_list(
-        ctx,
-        scene,
-        &mut selected,
-        &mut clipboard,
-        &models,
-        &pointer,
-    );
+    actor_list(ctx, scene, &mut selected, &mut clipboard, &models, &pointer);
     properties(ctx, scene, &selected);
     status_line(ctx, &status, &open);
 }
@@ -228,9 +229,7 @@ fn menu_bar(
                     ui.close();
                 }
                 let loaded = working.0.is_some();
-                if ui
-                    .add_enabled(loaded, egui::Button::new("Save"))
-                    .clicked()
+                if ui.add_enabled(loaded, egui::Button::new("Save")).clicked()
                     || (save_now && loaded)
                 {
                     save_or_report(working.0.as_ref(), &open.path, shown, status);
@@ -248,29 +247,6 @@ fn menu_bar(
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     exit.write(AppExit::Success);
-                }
-            });
-            ui.menu_button("View", |ui| {
-                let fullscreen = windows
-                    .iter()
-                    .next()
-                    .is_some_and(|window| window.mode != WindowMode::Windowed);
-                if ui
-                    .selectable_label(fullscreen, "Fullscreen")
-                    .clicked()
-                {
-                    for mut window in &mut windows {
-                        window.mode = if fullscreen {
-                            WindowMode::Windowed
-                        } else {
-                            // Borderless, not exclusive: a tool keeps the
-                            // desktop's resolution and its escape hatches,
-                            // which is what an exclusive fullscreen takes
-                            // away along with the title bar.
-                            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
-                        };
-                    }
-                    ui.close();
                 }
             });
             ui.menu_button("Edit", |ui| {
@@ -298,6 +274,26 @@ fn menu_bar(
                     ui.close();
                 }
             });
+            ui.menu_button("View", |ui| {
+                let fullscreen = windows
+                    .iter()
+                    .next()
+                    .is_some_and(|window| window.mode != WindowMode::Windowed);
+                if ui.selectable_label(fullscreen, "Fullscreen").clicked() {
+                    for mut window in &mut windows {
+                        window.mode = if fullscreen {
+                            WindowMode::Windowed
+                        } else {
+                            // Borderless, not exclusive: a tool keeps the
+                            // desktop's resolution and its escape hatches,
+                            // which is what an exclusive fullscreen takes
+                            // away along with the title bar.
+                            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+                        };
+                    }
+                    ui.close();
+                }
+            });
             ui.separator();
             let actors = working.0.as_ref().map_or(0, |scene| scene.actors.len());
             ui.label(format!("{} \u{2014} {actors} actors", open.path));
@@ -319,28 +315,15 @@ fn apply_edit(
     };
     match edit {
         Edit::Copy => {
-            clipboard.0 = selected
-                .0
-                .and_then(|index| scene.actors.get(index).cloned());
-        }
-        Edit::Paste => {
-            if let Some(copy) = clipboard.0.clone() {
-                let held: Vec<Option<String>> = scene.actors.iter().map(|a| a.id.clone()).collect();
-                scene.actors.push(paste_actor(copy, pointer, &held));
-                selected.0 = Some(scene.actors.len() - 1);
+            if let Some(index) = selected.0 {
+                copy_actor(scene, index, clipboard);
             }
         }
+        Edit::Paste => paste_into(scene, clipboard, pointer, selected),
         Edit::Delete => {
-            let Some(index) = selected.0 else {
-                return;
-            };
-            if scene.actors.get(index).is_some() {
-                scene.actors.remove(index);
+            if let Some(index) = selected.0 {
+                delete_actor(scene, index, selected);
             }
-            // Delete takes the selected actor, so there is nothing left to
-            // point at — not even when the selection had gone stale
-            // against a list that shrink underneath it.
-            selected.0 = None;
         }
     }
 }
@@ -360,42 +343,97 @@ fn actor_list(
         .resizable(true)
         .show(ctx, |ui| {
             if count == 0 {
-                ui.label("None yet. Right-click here to add one.");
+                ui.label("None yet. Right-click below to add one.");
             }
             for index in 0..count {
                 // A copy, because the menu below edits the list this row
                 // is standing in.
                 let actor = scene.actors[index].clone();
                 let row = ui.selectable_value(&mut selected.0, Some(index), actor_label(&actor));
-                // Right-clicking a row opens its menu; the row's own
-                // response carries the identity, so the menu follows the
-                // row rather than its position in the list.
+                // A right-click means "this one", and says so before the
+                // menu asks whether anything is selected.
+                if row.secondary_clicked() {
+                    selected.0 = Some(index);
+                }
+                let chosen = selected.0 == Some(index);
                 row.context_menu(|ui| {
-                    let mut asked = None;
-                    if ui.button("Copy").clicked() {
-                        clipboard.0 = Some(actor.clone());
-                        asked = Some(Edit::Copy);
+                    if ui.add_enabled(chosen, egui::Button::new("Copy")).clicked() {
+                        copy_actor(scene, index, clipboard);
                     }
                     if ui
-                        .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
+                        .add_enabled(chosen, egui::Button::new("Delete"))
                         .clicked()
                     {
-                        asked = Some(Edit::Paste);
+                        delete_actor(scene, index, selected);
                     }
-                    ui.separator();
-                    ui.label("Add");
-                    for model in &models.0 {
-                        if ui.button(short_name(model)).clicked() {
-                            scene.actors.push(new_actor(model, pointer));
-                            selected.0 = Some(scene.actors.len() - 1);
-                        }
-                    }
-                    // The list has already been edited directly above, so
-                    // the selection only needs following along.
-                    let _ = asked;
                 });
             }
+            // The space below the list. Adding and pasting belong to no
+            // actor in particular, and this rect deliberately does not
+            // overlap a row: an interact that covered the list would take
+            // the clicks and the hover away from the rows above it.
+            let empty = space_below(ui);
+            if empty.height() > 8.0 {
+                ui.interact(empty, ui.id().with("empty"), egui::Sense::click())
+                    .context_menu(|ui| {
+                        if ui
+                            .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
+                            .clicked()
+                        {
+                            paste_into(scene, clipboard, pointer, selected);
+                        }
+                        ui.separator();
+                        ui.label("Add");
+                        for model in &models.0 {
+                            if ui.button(short_name(model)).clicked() {
+                                scene.actors.push(new_actor(model, pointer));
+                                selected.0 = Some(scene.actors.len() - 1);
+                            }
+                        }
+                    });
+            }
         });
+}
+
+/// The part of a window below whatever has been drawn in it: the empty
+/// space under a list, which is not where the rows are and so cannot take
+/// their clicks.
+fn space_below(ui: &egui::Ui) -> egui::Rect {
+    egui::Rect::from_min_max(
+        egui::pos2(ui.max_rect().left(), ui.min_rect().bottom() + 4.0),
+        egui::pos2(ui.max_rect().right(), ui.max_rect().bottom()),
+    )
+}
+
+/// Copying an actor takes the one it was copied from.
+fn copy_actor(scene: &Scene, index: usize, clipboard: &mut Clipboard) {
+    clipboard.0 = scene.actors.get(index).cloned();
+}
+
+/// Deleting takes the actor out of the list, and deselects it: it is the
+/// actor the selection was pointing at that is now gone.
+fn delete_actor(scene: &mut Scene, index: usize, selected: &mut Selected) {
+    if scene.actors.get(index).is_some() {
+        scene.actors.remove(index);
+    }
+    if selected.0 == Some(index) {
+        selected.0 = None;
+    }
+}
+
+/// Pasting adds a copy of whatever was copied, standing beside where the
+/// camera looks, and selects it.
+fn paste_into(
+    scene: &mut Scene,
+    clipboard: &Clipboard,
+    pointer: &GroundPointer,
+    selected: &mut Selected,
+) {
+    if let Some(copy) = clipboard.0.clone() {
+        let held: Vec<Option<String>> = scene.actors.iter().map(|a| a.id.clone()).collect();
+        scene.actors.push(paste_actor(copy, pointer, &held));
+        selected.0 = Some(scene.actors.len() - 1);
+    }
 }
 
 /// The last path segment of an asset path, which is what a model menu
@@ -543,7 +581,10 @@ fn open_dialog(
             }
             for path in &scenes.0 {
                 if ui
-                    .selectable_label(&open.path == path, short_name(path).trim_end_matches(".scene"))
+                    .selectable_label(
+                        &open.path == path,
+                        short_name(path).trim_end_matches(".scene"),
+                    )
                     .clicked()
                 {
                     open.open(assets, path.clone());
@@ -615,12 +656,7 @@ fn valid_scene_name(name: &str) -> bool {
 }
 
 /// Saves the open scene, recording the result for the status line.
-fn save_or_report(
-    scene: Option<&Scene>,
-    path: &str,
-    shown: &mut Shown,
-    status: &mut Status,
-) {
+fn save_or_report(scene: Option<&Scene>, path: &str, shown: &mut Shown, status: &mut Status) {
     let outcome = match scene {
         Some(scene) => save(scene, path, shown),
         None => Err(std::io::Error::other("no scene is open")),
@@ -687,8 +723,17 @@ mod tests {
         let mut copy = working(vec![actor(Some("goblin"))]);
         let mut selected = Selected(Some(0));
         let mut clipboard = Clipboard::default();
-        apply_edit(Edit::Copy, &mut copy, &mut selected, &mut clipboard, &pointer());
-        assert_eq!(clipboard.0.as_ref().map(|a| a.id.clone()), Some(Some("goblin".to_owned())));
+        apply_edit(
+            Edit::Copy,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
+        assert_eq!(
+            clipboard.0.as_ref().map(|a| a.id.clone()),
+            Some(Some("goblin".to_owned()))
+        );
     }
 
     #[test]
@@ -696,7 +741,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("goblin"))]);
         let mut selected = Selected(None);
         let mut clipboard = Clipboard::default();
-        apply_edit(Edit::Copy, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Copy,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         assert!(clipboard.0.is_none());
     }
 
@@ -705,7 +756,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("goblin"))]);
         let mut selected = Selected(Some(0));
         let mut clipboard = Clipboard(Some(actor(Some("goblin"))));
-        apply_edit(Edit::Paste, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Paste,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         let scene = copy.0.unwrap();
         assert_eq!(scene.actors.len(), 2);
         assert_eq!(selected.0, Some(1));
@@ -718,7 +775,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("goblin"))]);
         let mut selected = Selected(Some(0));
         let mut clipboard = Clipboard(Some(actor(Some("goblin"))));
-        apply_edit(Edit::Paste, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Paste,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         let scene = copy.0.unwrap();
         assert_eq!(scene.actors[1].id.as_deref(), Some("goblin.1"));
     }
@@ -728,7 +791,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("a")), actor(Some("b")), actor(Some("c"))]);
         let mut selected = Selected(Some(1));
         let mut clipboard = Clipboard::default();
-        apply_edit(Edit::Delete, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Delete,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         let scene = copy.0.unwrap();
         assert_eq!(scene.actors.len(), 2);
         assert_eq!(scene.actors[1].id.as_deref(), Some("c"));
@@ -743,7 +812,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("a"))]);
         let mut selected = Selected(Some(7));
         let mut clipboard = Clipboard::default();
-        apply_edit(Edit::Delete, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Delete,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         assert_eq!(copy.0.unwrap().actors.len(), 1);
         assert_eq!(selected.0, None);
     }
@@ -753,7 +828,13 @@ mod tests {
         let mut copy = working(vec![actor(Some("a"))]);
         let mut selected = Selected(None);
         let mut clipboard = Clipboard::default();
-        apply_edit(Edit::Delete, &mut copy, &mut selected, &mut clipboard, &pointer());
+        apply_edit(
+            Edit::Delete,
+            &mut copy,
+            &mut selected,
+            &mut clipboard,
+            &pointer(),
+        );
         assert_eq!(copy.0.unwrap().actors.len(), 1);
     }
 
