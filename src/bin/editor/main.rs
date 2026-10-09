@@ -11,15 +11,20 @@
 //! the assets root, the card's geometry) lives in the library this
 //! binary and the game share; everything below is the editor's own.
 
+mod actors;
 mod camera;
+mod picking;
 mod scene_view;
+mod ui;
 
 use bevy::prelude::*;
 use bevy::window::WindowResolution;
 use bevy_common_assets::ron::RonAssetPlugin;
+use bevy_egui::{EguiPlugin, EguiPrimaryContextPass};
 
 use wakeful::scene::Scene;
 
+use actors::Selected;
 use camera::EditorCamera;
 use scene_view::OpenScene;
 
@@ -72,24 +77,48 @@ fn main() {
             }),
     )
     .add_plugins(RonAssetPlugin::<Scene>::new(&["scene"]))
+    .add_plugins(EguiPlugin::default())
     .insert_resource(ClearColor(Color::srgb(0.06, 0.06, 0.08)))
     .insert_resource(Args { scene })
     .init_resource::<scene_view::Shown>()
-    .add_systems(Startup, setup)
+    .init_resource::<Selected>()
+    .init_resource::<actors::GroundPointer>()
+    .init_resource::<ui::Clipboard>()
+    .init_resource::<ui::Status>()
+    .init_resource::<ui::Models>()
+    .init_resource::<ui::Dialog>()
+    .init_resource::<ui::Scenes>()
+    .init_resource::<camera::UiWantsInput>()
+    .init_resource::<scene_view::Working>()
+    .add_systems(Startup, (setup, ui::list_assets))
     .add_systems(
         Update,
         (
             // Chained: a reload despawns the background the builder may
             // be halfway through, and the builder must not race it.
+            camera::track_ui_input,
             scene_view::reload_when_changed,
             scene_view::apply_scene,
             scene_view::build_backgrounds,
+            // The actors are the scene asset's view of itself, so they
+            // follow the file: place them after whatever just rebuilt it.
+            actors::sync_actors,
+            actors::attach_models,
+            actors::track_ground_pointer,
             camera::fly,
             camera::zoom,
             scene_view::draw_walk_mesh,
+            actors::draw_selection,
             quit_on_escape,
         )
             .chain(),
+    )
+    // The panels and the picking that share a cursor with them run in the
+    // egui pass, chained so a click that opens a menu is not also read as
+    // a click on whatever the menu covered.
+    .add_systems(
+        EguiPrimaryContextPass,
+        (ui::panels, picking::select_on_click).chain(),
     );
 
     app.run();
@@ -129,9 +158,18 @@ fn setup(mut commands: Commands, assets: Res<AssetServer>, args: Res<Args>) {
     commands.insert_resource(OpenScene::new(&assets, args.scene.clone()));
 }
 
-/// The game's habit, kept: escape leaves.
-fn quit_on_escape(keys: Res<ButtonInput<KeyCode>>, mut exit: MessageWriter<AppExit>) {
-    if keys.just_pressed(KeyCode::Escape) {
-        exit.write(AppExit::Success);
+/// The game's habit, kept: escape leaves — but not while a field has
+/// focus, where escape means "let go of this" first.
+fn quit_on_escape(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut ctxs: bevy_egui::EguiContexts,
+    mut exit: MessageWriter<AppExit>,
+) {
+    if !keys.just_pressed(KeyCode::Escape) {
+        return;
     }
+    if ctxs.ctx_mut().is_ok_and(|ctx| ctx.egui_wants_keyboard_input()) {
+        return;
+    }
+    exit.write(AppExit::Success);
 }

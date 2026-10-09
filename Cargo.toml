@@ -15,6 +15,11 @@ bevy = "0.19"
 # dev tool render headless on software GL.
 bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
 bevy_common_assets = { version = "0.17", features = ["ron"] }
+# The editor's actor list, properties and context menus. The game does not
+# link it: the editor is its own binary (`cargo run --bin editor`), which
+# reads this crate's library for the scene file, the walk mesh and the
+# assets root.
+bevy_egui = "0.42"
 # The scene editor is a separate binary (`cargo run --bin editor`), which
 # reads this same crate's library: the scene file, the walk mesh, the
 # assets root. The game itself carries no editor code.

@@ -36,6 +36,22 @@ const PITCH_LIMIT: f32 = 1.5533;
 #[derive(Component)]
 pub struct EditorCamera;
 
+/// Whether egui has the keyboard or the pointer this frame.
+///
+/// Typing into a field must not fly the camera — WASD are letters — and a
+/// right-drag that opened a menu must not spin the view. One flag decides
+/// both, read from egui's state as of the previous frame, which is the
+/// freshest egui can say before its own pass has run this one.
+#[derive(Resource, Default)]
+pub struct UiWantsInput(pub bool);
+
+/// Asks egui whether it wants the input.
+pub fn track_ui_input(mut ctxs: bevy_egui::EguiContexts, mut wants: ResMut<UiWantsInput>) {
+    wants.0 = ctxs.ctx_mut().is_ok_and(|ctx| {
+        ctx.egui_wants_keyboard_input() || ctx.is_pointer_over_egui()
+    });
+}
+
 /// The rotation a given yaw/pitch looks along, with pitch clamped.
 ///
 /// Yaw turns about world up, then pitch about the camera's own right, so
@@ -88,8 +104,12 @@ pub fn fly(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<MouseButton>>,
     motion: Res<AccumulatedMouseMotion>,
+    wants_input: Res<UiWantsInput>,
     mut cameras: Query<&mut Transform, With<EditorCamera>>,
 ) {
+    if wants_input.0 {
+        return;
+    }
     let Ok(mut transform) = cameras.single_mut() else {
         return;
     };
@@ -127,10 +147,11 @@ pub fn fly(
 /// close without leaving the app.
 pub fn zoom(
     scroll: Res<AccumulatedMouseScroll>,
+    wants_input: Res<UiWantsInput>,
     mut cameras: Query<&mut Projection, With<EditorCamera>>,
 ) {
     let scroll = scroll.delta.y;
-    if scroll == 0.0 {
+    if scroll == 0.0 || wants_input.0 {
         return;
     }
     let Ok(mut projection) = cameras.single_mut() else {
@@ -160,6 +181,7 @@ mod tests {
         world.insert_resource(ButtonInput::<KeyCode>::default());
         world.insert_resource(ButtonInput::<MouseButton>::default());
         world.insert_resource(AccumulatedMouseMotion::default());
+        world.insert_resource(UiWantsInput::default());
         let camera = world
             .spawn((
                 EditorCamera,

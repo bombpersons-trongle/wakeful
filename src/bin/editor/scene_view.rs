@@ -9,7 +9,7 @@
 
 use std::time::{Duration, SystemTime};
 
-use bevy::asset::AssetEvent;
+use bevy::asset::{AssetEvent, AssetId};
 use bevy::asset::RenderAssetUsages;
 use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
@@ -32,8 +32,10 @@ const FLAT_BACKGROUND_DISTANCE: f32 = 20.0;
 /// The scene file the editor has open, by its path under `assets/`.
 #[derive(Resource)]
 pub struct OpenScene {
-    path: String,
-    handle: Handle<Scene>,
+    pub path: String,
+    /// The loaded scene, which is what every system edits: the editor
+    /// holds the asset rather than a copy of it, so an edit is the scene.
+    pub handle: Handle<Scene>,
 }
 
 impl OpenScene {
@@ -41,7 +43,35 @@ impl OpenScene {
         let handle = assets.load(path.clone());
         OpenScene { path, handle }
     }
+
+    /// The file's name on its own, which is how the editor names a scene in
+    /// menus and titles.
+    pub fn name(&self) -> String {
+        self.path
+            .rsplit('/')
+            .next()
+            .unwrap_or(&self.path)
+            .trim_end_matches(".scene")
+            .to_owned()
+    }
+
+    /// Switches to another scene file, as File > Open and Save As do.
+    pub fn open(&mut self, assets: &AssetServer, path: String) {
+        self.handle = assets.load(path.clone());
+        self.path = path;
+    }
 }
+
+/// The scene as the editor holds it: a working copy of the asset, which
+/// the panels edit.
+///
+/// The asset itself is only how a scene arrives. Editing it in place
+/// would be tidier and does not work: a mutable borrow of an asset emits
+/// `AssetEvent::Modified`, so every drag of a number would look to the
+/// reloader exactly like the file changing, and the editor would rebuild
+/// the world under the pointer sixty times a second.
+#[derive(Resource, Default)]
+pub struct Working(pub Option<Scene>);
 
 /// Everything the current scene put in the world, so a reload can take
 /// it all down again.
@@ -73,8 +103,24 @@ pub struct Pending {
 #[derive(Resource, Default)]
 pub struct Shown {
     read: bool,
-    written: Option<SystemTime>,
+    /// The write the scene file was last read from, or last saved to.
+    pub written: Option<SystemTime>,
     since_poll: Duration,
+    /// The scene the camera was posed for. A reload of the same scene
+    /// leaves the camera where the editor's owner has flown it; only a
+    /// different scene puts it back where that scene's camera is.
+    posed_for: Option<AssetId<Scene>>,
+}
+
+impl Shown {
+    /// Forgets what has been read and shown, so the next scene — opened
+    /// from the menu, or written under a new name — is applied from
+    /// scratch and posed on the camera.
+    pub fn forget(&mut self) {
+        self.read = false;
+        self.written = None;
+        self.posed_for = None;
+    }
 }
 
 /// Re-reads the open scene file when it changes on disk, or when F5 asks.
@@ -127,6 +173,7 @@ pub fn apply_scene(
     open: Res<OpenScene>,
     mut events: MessageReader<AssetEvent<Scene>>,
     mut shown: ResMut<Shown>,
+    mut working: ResMut<Working>,
     content: Query<Entity, With<SceneContent>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<EditorCamera>>,
 ) {
@@ -144,6 +191,9 @@ pub fn apply_scene(
         return;
     };
     shown.read = true;
+    // A scene edited outside the editor replaces whatever was here: an
+    // external change wins, and the models are rebuilt from it below.
+    working.0 = Some(scene.clone());
     for entity in &content {
         commands.entity(entity).despawn();
     }
@@ -160,14 +210,20 @@ pub fn apply_scene(
         scene.teleporters.len(),
         scene.actors.len(),
     );
-    if let Ok((mut transform, mut projection)) = cameras.single_mut() {
-        *transform = Transform::from_translation(scene.camera.position.into())
-            .looking_at(scene.camera.target.into(), Vec3::Y);
-        // Through the scene's own fov, the card is exactly the plate: the
-        // editor opens on the game's framing, and the scroll wheel is
-        // there for the times that is too wide to work in.
-        if let Projection::Perspective(perspective) = &mut *projection {
-            perspective.fov = scene.camera.fov_degrees.to_radians();
+    // Once per scene, not once per reload: a scene saved from the editor
+    // is re-read, and a camera yanked back to the scene's pose at that
+    // moment would be the tool moving the view out from under you.
+    if shown.posed_for != Some(open.handle.id()) {
+        shown.posed_for = Some(open.handle.id());
+        if let Ok((mut transform, mut projection)) = cameras.single_mut() {
+            *transform = Transform::from_translation(scene.camera.position.into())
+                .looking_at(scene.camera.target.into(), Vec3::Y);
+            // Through the scene's own fov, the card is exactly the plate:
+            // the editor opens on the game's framing, and the scroll
+            // wheel is there for the times that is too wide to work in.
+            if let Projection::Perspective(perspective) = &mut *projection {
+                perspective.fov = scene.camera.fov_degrees.to_radians();
+            }
         }
     }
     match (&scene.background, &scene.depth_map) {
@@ -291,9 +347,10 @@ fn flat_quad(pose: &CameraPose, plate_width: f32, plate_height: f32) -> Mesh {
 /// Draws the walk mesh every frame. The editor has one job here and this
 /// is the point of it, so unlike the game there is no toggle: the mesh is
 /// always on screen.
-pub fn draw_walk_mesh(scenes: Res<Assets<Scene>>, open: Res<OpenScene>, mut gizmos: Gizmos) {
-    let Some(mesh) = scenes
-        .get(&open.handle)
+pub fn draw_walk_mesh(working: Res<Working>, mut gizmos: Gizmos) {
+    let Some(mesh) = working
+        .0
+        .as_ref()
         .and_then(|scene| scene.walk_mesh.as_ref())
     else {
         return;

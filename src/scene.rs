@@ -118,6 +118,24 @@ pub struct Teleporter {
     pub arrival: [f32; 2],
 }
 
+/// Serializes a scene the way the exporter's output reads: indented, but
+/// with arrays left on one line.
+///
+/// The arrays are the point. A walk mesh is thousands of vertices, and one
+/// per line turns every re-export into a ten-thousand-line diff nobody can
+/// read — which is the whole reason the exporter stopped writing scene
+/// files itself.
+///
+/// Comments do not survive this: RON has no way to write one back, so a
+/// scene file is a generated artifact and anything a scene needs said
+/// belongs somewhere else.
+pub fn to_ron(scene: &Scene) -> Result<String, ron::Error> {
+    let config = ron::ser::PrettyConfig::default().compact_arrays(true);
+    let mut ron = ron::ser::to_string_pretty(scene, config)?;
+    ron.push('\n');
+    Ok(ron)
+}
+
 impl Teleporter {
     /// Whether the world XZ position lies inside the trigger rect. The
     /// low edge counts as inside, the high edge belongs to the next rect
@@ -189,7 +207,47 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_scene_ron() {
+    fn a_scene_survives_being_written_and_read_back() {
+        // What the editor's save does. Dynamic has no PartialEq, so the
+        // params are compared by what they print as: the values a script
+        // reads back with `param` have to be the values that went in.
+        let src = r#"(
+            camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
+            walk_mesh: Some((
+                vertices: [(0.0, 0.0, 0.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0)],
+                triangles: [(0, 1, 2)],
+            )),
+            depth_range: 12.5,
+            pan: Some((plate: (640, 480), window: (320, 240))),
+            actors: [
+                (
+                    model: "models/goblin.glb",
+                    position: (-28.3, -106.86),
+                    id: Some("goblin"),
+                    script: Some("scripts/goblin.rhai"),
+                    params: { "item": "bread", "count": 2 },
+                ),
+            ],
+        )"#;
+        let before: Scene = ron::from_str(src).unwrap();
+
+        let text = to_ron(&before).unwrap();
+        let after: Scene = ron::from_str(&text).unwrap();
+
+        assert_eq!(after.camera, before.camera);
+        assert_eq!(after.depth_range, before.depth_range);
+        assert_eq!(after.pan, before.pan);
+        assert_eq!(after.walk_mesh.map(|m| m.vertices), before.walk_mesh.map(|m| m.vertices));
+        assert_eq!(
+            after.actors[0].params.values().map(ToString::to_string).collect::<Vec<_>>(),
+            before.actors[0].params.values().map(ToString::to_string).collect::<Vec<_>>(),
+        );
+        assert_eq!(after.actors[0].position, before.actors[0].position);
+        assert_eq!(after.actors[0].id, before.actors[0].id);
+    }
+
+    #[test]
+    fn parsing_scene_ron() {
         let src = r#"(
             background: Some("backgrounds/room1.png"),
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),

@@ -40,6 +40,14 @@ const EDGE_EPS: f64 = 1e-4;
 /// edges, which a mesh Blender did not weld does not reliably have.
 const RING_SAMPLES: usize = 12;
 
+/// How far a raycast steps looking for the surface, how far it will go
+/// before giving up, and how many times it halves the step it landed on.
+/// A quarter of a metre is finer than any terrain here, and twenty
+/// halvines are far more than the mesh's own millimetre precision.
+const RAY_STEP: f32 = 0.25;
+const RAY_FARTHEST: f32 = 500.0;
+const RAY_REFINE: usize = 20;
+
 /// A triangulated walkable surface: where characters may put their feet,
 /// and how high the ground is there.
 #[derive(Deserialize, Serialize, Clone, Debug, Default)]
@@ -116,6 +124,54 @@ impl WalkMesh {
             return Vec2::new(from.x, to.y);
         }
         from
+    }
+
+    /// Where a ray first goes under the mesh's surface, if it does at all.
+    ///
+    /// Marching at a fixed step and then bisecting the crossing finds the
+    /// surface to a hair, which is all an editor needs to put something
+    /// under the cursor. A ray that starts underground has no crossing to
+    /// find and reports none.
+    pub fn raycast(&self, origin: Vec3, direction: Vec3) -> Option<Vec3> {
+        let direction = direction.normalize();
+        if !direction.is_finite() || direction == Vec3::ZERO {
+            return None;
+        }
+        let above = |at: f32| {
+            let point = origin + direction * at;
+            // Off the mesh is not below it: a ray leaving the footprint
+            // keeps going rather than reporting a hit on thin air.
+            self.height_at(point.x, point.z)
+                .is_some_and(|height| point.y >= height)
+        };
+        if !above(0.0) {
+            return None;
+        }
+        let mut previous = 0.0;
+        let mut at = RAY_STEP;
+        while at <= RAY_FARTHEST {
+            if !above(at) {
+                // The surface is between the last step above and this one
+                // below; bisect it down to where it actually is.
+                let (mut low, mut high) = (previous, at);
+                for _ in 0..RAY_REFINE {
+                    let middle = 0.5 * (low + high);
+                    if above(middle) {
+                        low = middle;
+                    } else {
+                        high = middle;
+                    }
+                }
+                let point = origin + direction * high;
+                // The crossing's own height, so a sloped mesh is hit on
+                // its surface rather than a hair above it.
+                let y = self.height_at(point.x, point.z).unwrap_or(point.y);
+                return Some(Vec3::new(point.x, y, point.z));
+            }
+            previous = at;
+            at += RAY_STEP;
+        }
+        None
     }
 
     /// The triangle indices bucketed under a world XZ position, building
@@ -489,6 +545,49 @@ mod tests {
         assert!(!mesh.contains(0.0, 0.0));
         assert_eq!(mesh.height_at(0.0, 0.0), None);
         assert_eq!(mesh.constrain(Vec2::ZERO, Vec2::ONE, 0.0), Vec2::ZERO);
+    }
+
+    #[test]
+    fn a_ray_from_above_stops_on_the_surface() {
+        // The quad is flat at zero, so the answer is the point straight
+        // under the ray.
+        let mesh = quad([0.0, 0.0], [2.0, 2.0], 0.0);
+        let hit = mesh.raycast(Vec3::new(1.0, 5.0, 1.0), Vec3::NEG_Y).unwrap();
+        assert!((hit - Vec3::new(1.0, 0.0, 1.0)).length() < 1e-3, "{hit:?}");
+    }
+
+    #[test]
+    fn a_ray_stops_on_a_slope_at_its_own_height() {
+        // 2 x 2 quad from (0,0,0) to (2,2,2): the height rises with both
+        // x and z, so the surface at (1,1) is at one.
+        let mesh = WalkMesh::new(
+            vec![
+                [0.0, 0.0, 0.0],
+                [2.0, 2.0, 0.0],
+                [0.0, 0.0, 2.0],
+                [2.0, 2.0, 2.0],
+            ],
+            vec![[0, 1, 2], [2, 1, 3]],
+        );
+        let hit = mesh.raycast(Vec3::new(1.0, 9.0, 1.0), Vec3::NEG_Y).unwrap();
+        assert!((hit - Vec3::new(1.0, 1.0, 1.0)).length() < 1e-3, "{hit:?}");
+    }
+
+    #[test]
+    fn a_ray_that_misses_the_mesh_hits_nothing() {
+        let mesh = quad([0.0, 0.0], [2.0, 2.0], 0.0);
+        // Overhead, but off to the side of the quad.
+        assert!(mesh.raycast(Vec3::new(50.0, 5.0, 1.0), Vec3::NEG_Y).is_none());
+        // Past it, at its own height, never dropping toward it.
+        assert!(mesh.raycast(Vec3::new(-50.0, 1.0, 1.0), Vec3::X).is_none());
+        // Out of the world entirely, and a direction that is not one.
+        assert!(mesh.raycast(Vec3::ZERO, Vec3::ZERO).is_none());
+    }
+
+    #[test]
+    fn a_ray_that_starts_underground_has_no_crossing() {
+        let mesh = quad([0.0, 0.0], [2.0, 2.0], 0.0);
+        assert!(mesh.raycast(Vec3::new(1.0, -5.0, 1.0), Vec3::NEG_Y).is_none());
     }
 
     #[test]
