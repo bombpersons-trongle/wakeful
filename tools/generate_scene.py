@@ -1,7 +1,13 @@
 #!/usr/bin/env python3
 """Generates wakeful scene assets from a Blender file: the rendered
-background ("plate"), its matching depth map, and the .scene file that
-wires them up.
+background ("plate"), its matching depth map, and a .export file holding
+the half of the scene Blender owns.
+
+The .scene file itself is finished by `scene-merge`
+(`cargo run --bin scene-merge`), which folds the .export into whatever is
+already on disk and keeps the actors, teleporters and scene script a
+re-export has no business overwriting. `tools/export_scenes.sh` runs both
+halves.
 
     blender -b raw_assets/village_1.blend -P tools/generate_scene.py \
         -- [--name village_1] [--resolution 320x240]
@@ -258,8 +264,10 @@ def depth_map_path(name):
     return os.path.join(assets_root(), "backgrounds", f"{name}_depth.png")
 
 
-def scene_path(name):
-    return os.path.join(assets_root(), "scenes", f"{name}.scene")
+def export_path(name):
+    """The scene's Blender-owned half. `scene-merge` folds it into the
+    .scene file beside it, which this script never touches."""
+    return os.path.join(assets_root(), "scenes", f"{name}.export")
 
 
 def plate_fovs(camera, plate):
@@ -370,7 +378,7 @@ def ron_float(v):
     return repr(round(float(v), 5))
 
 
-def scene_ron(origin, target, fov, name, depth_range, pan=None, walk=None):
+def export_ron(origin, target, fov, name, depth_range, pan=None, walk=None):
     pos = ", ".join(ron_float(c) for c in origin)
     look = ", ".join(ron_float(c) for c in target)
     pan_line = (
@@ -401,9 +409,7 @@ def scene_ron(origin, target, fov, name, depth_range, pan=None, walk=None):
 {mesh_line}    background: Some("backgrounds/{name}.png"),
     depth_map: Some("backgrounds/{name}_depth.png"),
     depth_range: {ron_float(depth_range)},
-{pan_line}    teleporters: [],
-    actors: [],
-)
+{pan_line})
 """
 
 
@@ -427,10 +433,10 @@ def export_scene(name, camera, plate, walk=None):
     # The scene's fov is the plate's: the depth card unprojects the map
     # through it, so the two must agree exactly.
     _, fov = plate_fovs(camera, plate)
-    path = scene_path(name)
+    path = export_path(name)
     with open(path, "w") as fh:
         fh.write(
-            scene_ron(
+            export_ron(
                 origin,
                 target,
                 fov,
@@ -441,6 +447,10 @@ def export_scene(name, camera, plate, walk=None):
             )
         )
     print(f"[generate_scene] wrote {path}")
+    print(
+        "[generate_scene] fold it into the scene with: "
+        "cargo run --bin scene-merge"
+    )
     print(
         "[generate_scene] camera pose: position="
         f"{tuple(round(c, 3) for c in origin)} "

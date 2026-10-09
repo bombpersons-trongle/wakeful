@@ -72,6 +72,15 @@ Contributors work like any outside contributor — no special privileges:
   re-exports those with `pub use wakeful::{…}` so `crate::scene::…`
   keeps resolving; the old in-game egui editor is gone, and with it the
   `bevy_egui` dependency.
+- Scene files have two authors and the exporter is only one of them.
+  `tools/export_scenes.sh <blend>` is the whole export: Blender writes
+  the plate, the depth map and `assets/scenes/<name>.export` (gitignored),
+  then `cargo run --bin scene-merge` folds that half into `<name>.scene`,
+  keeping the `actors`, `teleporters` and `script` the editor and
+  hand-written scenes own (`ExportedScene` in `src/scene_merge.rs` is the
+  exporter's half; a stray `actors` in an export is dropped, not merged).
+  Consequence: `.scene` files are now generated, so **RON comments in
+  them do not survive an export** — say what a scene needs said elsewhere.
 - Bevy systems live in `src/systems/<concern>.rs` (e.g. `camera.rs`,
   `debug_draw.rs`); `main.rs` only wires plugins, schedules, and the shared
   components/resources the systems operate on. Self-contained feature modules

@@ -3,12 +3,22 @@
 //! Pure math with no Bevy ECS involved, so the unit tests below run
 //! without an app or a window. A scene carries one of these in place of
 //! the old cell grid, which could only ever describe a flat floor.
+//!
+//! The one piece that knows about rendering is [`draw`], the gizmo
+//! overlay both the game (F2) and the editor use — shared so the mesh
+//! looks the same wherever it is inspected.
 
 use core::f32::consts::TAU;
 use std::sync::OnceLock;
 
-use bevy::math::Vec2;
+use bevy::math::{Vec2, Vec3};
+use bevy::prelude::{Color, Gizmos};
 use serde::{Deserialize, Serialize};
+
+/// The walk-mesh overlay hovers just above the mesh so the lines don't
+/// z-fight with the characters standing on it.
+const DRAW_LIFT: f32 = 0.02;
+const DRAW_COLOR: Color = Color::srgba(0.25, 0.9, 0.35, 0.4);
 
 /// Side of one bucket cell, in meters. Village-scale terrain lands a
 /// handful of triangles in each.
@@ -32,7 +42,7 @@ const RING_SAMPLES: usize = 12;
 
 /// A triangulated walkable surface: where characters may put their feet,
 /// and how high the ground is there.
-#[derive(Deserialize, Serialize, Debug, Default)]
+#[derive(Deserialize, Serialize, Clone, Debug, Default)]
 pub struct WalkMesh {
     /// World-space triangle corners, `[x, y, z]`.
     pub vertices: Vec<[f32; 3]>,
@@ -45,6 +55,17 @@ pub struct WalkMesh {
 }
 
 impl WalkMesh {
+    /// A mesh from world-space vertices and triangle indices. The query
+    /// acceleration is built on the first query rather than here, so
+    /// building one is cheap and it serializes as it stands.
+    pub fn new(vertices: Vec<[f32; 3]>, triangles: Vec<[u32; 3]>) -> Self {
+        Self {
+            vertices,
+            triangles,
+            buckets: OnceLock::new(),
+        }
+    }
+
     /// The ground height directly under a world XZ position, if the mesh
     /// covers it. Where triangles overlap — a ledge over a path — the
     /// highest surface wins, so a character stands on top of the stack.
@@ -142,10 +163,28 @@ pub fn ground_height(mesh: Option<&WalkMesh>, x: f32, z: f32, near: Vec2) -> f32
     .unwrap_or(0.0)
 }
 
+/// Draws every triangle as a line loop, so the walkable surface and its
+/// edges are visible where they actually are in the world.
+pub fn draw(gizmos: &mut Gizmos, mesh: &WalkMesh) {
+    let lift = |v: [f32; 3]| Vec3::new(v[0], v[1] + DRAW_LIFT, v[2]);
+    for triangle in &mesh.triangles {
+        let points: Vec<Vec3> = triangle
+            .iter()
+            .filter_map(|i| mesh.vertices.get(*i as usize))
+            .map(|v| lift(*v))
+            .collect();
+        if points.len() == 3 {
+            gizmos.line(points[0], points[1], DRAW_COLOR);
+            gizmos.line(points[1], points[2], DRAW_COLOR);
+            gizmos.line(points[2], points[0], DRAW_COLOR);
+        }
+    }
+}
+
 /// A uniform grid over the ground plane: each cell lists the triangles
 /// whose footprint touches it, so a query tests a handful of triangles
 /// instead of all of them. Built once, on the mesh's first query.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct BucketGrid {
     /// World XZ of the low corner of cell `[0][0]`.
     origin: [f32; 2],

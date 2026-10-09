@@ -8,9 +8,9 @@ use rhai::Dynamic;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-use crate::walkmesh::WalkMesh;
+pub use crate::walkmesh::WalkMesh;
 
-#[derive(Asset, TypePath, Deserialize, Serialize)]
+#[derive(Asset, TypePath, Deserialize, Serialize, Clone)]
 pub struct Scene {
     /// Path to the background image, relative to `assets/`. Expected to be
     /// the game's virtual resolution (320x240), like a pre-rendered FF7 room.
@@ -79,14 +79,34 @@ impl PanSpec {
     }
 }
 
-#[derive(Deserialize, Serialize, Clone, Copy)]
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq)]
 pub struct CameraPose {
     pub position: [f32; 3],
     pub target: [f32; 3],
     pub fov_degrees: f32,
 }
 
-#[derive(Deserialize, Serialize, Debug, PartialEq)]
+/// The scene files that ship with the game, by name under `assets/scenes`.
+/// The editor's scene picker will offer exactly these.
+pub const SHIPPED_SCENES: &[&str] = &[
+    "devroom.scene",
+    "room2.scene",
+    "Village_Entrance.scene",
+    "Shops_And_Bar.scene",
+];
+
+/// Reads a shipped scene file straight off disk, by name. A running game
+/// gets its scene through the asset server instead; this is the path for
+/// anything that wants the file rather than the loaded asset, which today
+/// means the tests on both sides of the library.
+pub fn read_shipped(name: &str) -> Scene {
+    let path = crate::assets::assets_root().join("scenes").join(name);
+    let text =
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{path:?} is readable: {e}"));
+    ron::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"))
+}
+
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq)]
 pub struct Teleporter {
     /// World XZ center of the trigger rect.
     pub position: [f32; 2],
@@ -111,7 +131,7 @@ impl Teleporter {
     }
 }
 
-#[derive(Deserialize, Serialize, Debug)]
+#[derive(Deserialize, Serialize, Clone, Debug)]
 pub struct Actor {
     /// Optional game-wide identity: the key this actor's private
     /// script storage lives under. Two actors with the same id share
@@ -359,27 +379,10 @@ mod tests {
         assert!(!teleporter.contains(4.0, 0.5));
     }
 
-    /// The shipped scene file parsed, by name under `assets/scenes/`.
-    fn shipped(name: &str) -> Scene {
-        let path =
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/scenes").join(name);
-        let text = std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("{path:?} is readable: {e}"));
-        ron::from_str(&text).unwrap_or_else(|e| panic!("{name} parses: {e}"))
-    }
-
-    /// Every scene the game can load, by file name under `assets/scenes/`.
-    const SHIPPED: &[&str] = &[
-        "devroom.scene",
-        "room2.scene",
-        "Village_Entrance.scene",
-        "Shops_And_Bar.scene",
-    ];
-
     #[test]
     fn every_shipped_scene_parses() {
-        for name in SHIPPED {
-            shipped(name);
+        for name in SHIPPED_SCENES {
+            read_shipped(name);
         }
     }
 
@@ -388,8 +391,8 @@ mod tests {
         // An actor placed off its scene's mesh stands on nothing (or is
         // clamped onto it on the first scripted step), so every placed
         // character has to start on the ground the player walks on.
-        for name in SHIPPED {
-            let scene = shipped(name);
+        for name in SHIPPED_SCENES {
+            let scene = read_shipped(name);
             let Some(mesh) = &scene.walk_mesh else {
                 continue;
             };
@@ -401,19 +404,6 @@ mod tests {
                     actor.position
                 );
             }
-            for (index, teleporter) in scene.teleporters.iter().enumerate() {
-                // Arrivals are where the player stands: a body overhanging
-                // the mesh is stuck there, because constrain rejects whole
-                // moves rather than stepping out.
-                assert!(
-                    mesh.contains_circle(
-                        teleporter.arrival[0],
-                        teleporter.arrival[1],
-                        crate::systems::player::PLAYER_RADIUS
-                    ),
-                    "{name}: teleporter {index} arrives off the walk mesh"
-                );
-            }
         }
     }
 
@@ -422,7 +412,7 @@ mod tests {
         // The village terrain is not flat, which is the whole reason the
         // grid was replaced: a character has to ride the surface, not a
         // constant height.
-        let mesh = shipped("Village_Entrance.scene")
+        let mesh = read_shipped("Village_Entrance.scene")
             .walk_mesh
             .expect("the village entrance exports a walk mesh");
         let heights: Vec<f32> = [
@@ -449,8 +439,8 @@ mod tests {
         // Both halves must parse, and each side's arrival point must sit
         // inside the destination's trigger region, or the player re-triggers
         // the moment the transition lands.
-        let devroom = shipped("devroom.scene");
-        let room2 = shipped("room2.scene");
+        let devroom = read_shipped("devroom.scene");
+        let room2 = read_shipped("room2.scene");
 
         let [to_room2] = devroom
             .teleporters
@@ -467,110 +457,6 @@ mod tests {
         assert_eq!(from_room2.target, "scenes/devroom.scene");
         assert!(from_room2.contains(to_room2.arrival[0], to_room2.arrival[1]));
         assert!(to_room2.contains(from_room2.arrival[0], from_room2.arrival[1]));
-    }
-
-    #[test]
-    fn the_shipped_actors_run_contract_abiding_scripts() {
-        // The demo cast lives in a village scene; every actor that IS
-        // shipped must be contract-abiding, and each character's contract
-        // holds whenever that character ships.
-        let scene = SHIPPED
-            .iter()
-            .map(|name| shipped(name))
-            .find(|scene| !scene.actors.is_empty())
-            .expect("a shipped scene ships actors");
-
-        for actor in &scene.actors {
-            match actor.id.as_deref() {
-                Some("goblin") => {
-                    assert_eq!(actor.model, "models/goblin.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/goblin.rhai"));
-                }
-                Some("tester") => {
-                    assert_eq!(actor.model, "models/goblin.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/tester.rhai"));
-                }
-                Some("entrance-chest") | Some("corner-chest") => {
-                    assert_eq!(actor.model, "models/chest.glb");
-                    assert_eq!(actor.script.as_deref(), Some("scripts/chest.rhai"));
-                    assert!(actor.id.is_some(), "a chest without an id shares memory");
-                    assert!(!actor.shared, "chests are scene-local");
-                    let item = if actor.id.as_deref() == Some("entrance-chest") {
-                        "a health potion"
-                    } else {
-                        "an elixir"
-                    };
-                    assert_eq!(
-                        actor
-                            .params
-                            .get("item")
-                            .and_then(|v| v.clone().into_string().ok()),
-                        Some(item.to_owned())
-                    );
-                }
-                other => panic!("shipped actor with unknown id {other:?}"),
-            }
-        }
-
-        // The shipped scripts compile and answer the actor contract.
-        let mut scope = rhai::Scope::new();
-        if let Some(goblin) = scene
-            .actors
-            .iter()
-            .find(|a| a.id.as_deref() == Some("goblin"))
-        {
-            let goblin_script =
-                crate::scripts::ActorScript::compile(include_str!("../assets/scripts/goblin.rhai"))
-                    .expect("the shipped goblin script must compile");
-            // Far from the player the goblin closes in; close by it
-            // stays put. The player is a fixed distance north-east of
-            // wherever the goblin stands, so the step must close that gap.
-            let (goblin_x, goblin_z) = (goblin.position[0], goblin.position[1]);
-            let (player_x, player_z) = (goblin_x + 10.0, goblin_z - 10.0);
-            let moved = goblin_script
-                .update(&mut scope, goblin_x, goblin_z, player_x, player_z, 1.0 / 60.0)
-                .unwrap()
-                .position
-                .expect("the goblin approaches a far player");
-            assert!(moved[0] > goblin_x && moved[1] < goblin_z);
-            assert_eq!(
-                goblin_script
-                    .update(
-                        &mut scope,
-                        goblin_x,
-                        goblin_z,
-                        goblin_x,
-                        goblin_z,
-                        1.0 / 60.0,
-                    )
-                    .unwrap()
-                    .position,
-                None
-            );
-        }
-        if let Some(entrance) = scene
-            .actors
-            .iter()
-            .find(|a| a.id.as_deref() == Some("entrance-chest"))
-        {
-            let chest_script =
-                crate::scripts::ActorScript::compile(include_str!("../assets/scripts/chest.rhai"))
-                    .expect("the shipped chest script must compile");
-            // A chest with nobody nearby holds still and stays shut.
-            let (chest_x, chest_z) = (entrance.position[0], entrance.position[1]);
-            let tick = chest_script
-                .update(
-                    &mut scope,
-                    chest_x,
-                    chest_z,
-                    chest_x + 50.0,
-                    chest_z + 50.0,
-                    1.0 / 60.0,
-                )
-                .unwrap();
-            assert_eq!(tick.position, None);
-            assert!(tick.emote.is_none());
-        }
     }
 
     #[test]
@@ -692,7 +578,7 @@ mod tests {
     fn ships_a_valid_devroom_scene() {
         // The file the game loads at startup must stay parseable and
         // carry a camera, whatever else it holds.
-        let scene = shipped("devroom.scene");
+        let scene = read_shipped("devroom.scene");
         assert!(scene.camera.fov_degrees > 0.0);
     }
 }

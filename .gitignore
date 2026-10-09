@@ -5,3 +5,6 @@ AGENTS.local.md
 
 # Save files are per-playthrough local data
 /saves
+
+# Blender's half of a scene, folded into the .scene by scene-merge.
+assets/scenes/*.export
