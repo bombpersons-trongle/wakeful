@@ -32,7 +32,6 @@ const PASTE_OFFSET: f32 = 1.0;
 const DOCK_LEFT: f32 = 12.0;
 const ACTORS_TOP: f32 = 40.0;
 const PROPERTIES_TOP: f32 = 320.0;
-const STATUS_TOP: f32 = 600.0;
 const DIALOG_TOP: f32 = 40.0;
 
 /// A window's starting place, a little in from the left edge.
@@ -142,12 +141,17 @@ pub fn panels(
     let Ok(ctx) = ctxs.ctx_mut() else {
         return;
     };
+    // One root Ui for the two bars, on a layer paint hits rather than the
+    // background: the camera has to know when the pointer is over a menu
+    // and not a wall, and egui's own test ignores anything on the
+    // background.
+    let mut root = root_ui(ctx);
     // Ctrl-S saves from anywhere, including while a number is being
     // dragged, which is when saving is most likely to be what you want.
     let save_now = keys.just_pressed(KeyCode::KeyS) && keys.pressed(KeyCode::ControlLeft);
 
     menu_bar(
-        ctx,
+        &mut root,
         windows,
         &mut working,
         &mut selected,
@@ -196,14 +200,30 @@ pub fn panels(
         &mut list_sweep,
     );
     properties(ctx, scene, &selected);
-    status_line(ctx, &status, &open);
+    status_bar(&mut root, &status, &open);
+}
+
+/// A Ui covering the whole viewport, on a layer egui's own pointer test
+/// looks at: `is_pointer_over_egui` ignores anything on the background,
+/// and the camera has to know when a menu has the pointer.
+fn root_ui(ctx: &egui::Context) -> egui::Ui {
+    egui::Ui::new(
+        ctx.clone(),
+        "editor".into(),
+        egui::UiBuilder::new()
+            .layer_id(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::new("editor"),
+            ))
+            .max_rect(ctx.viewport_rect()),
+    )
 }
 
 /// The menu bar across the top: what can be done to the file, and to what
 /// is selected.
 #[allow(clippy::too_many_arguments)]
 fn menu_bar(
-    ctx: &egui::Context,
+    root: &mut egui::Ui,
     mut windows: Query<&mut Window>,
     working: &mut Working,
     selected: &mut Selected,
@@ -216,22 +236,7 @@ fn menu_bar(
     save_now: bool,
     exit: &mut MessageWriter<AppExit>,
 ) {
-    // egui's panels take a Ui rather than a Context, so the bar starts
-    // from one covering the whole viewport.
-    let mut root = egui::Ui::new(
-        ctx.clone(),
-        "menu-bar".into(),
-        egui::UiBuilder::new()
-            // Middle, not the background layer: `is_pointer_over_egui`
-            // ignores anything on the background, and the camera has to
-            // know when a menu has the pointer.
-            .layer_id(egui::LayerId::new(
-                egui::Order::Middle,
-                egui::Id::new("editor"),
-            ))
-            .max_rect(ctx.viewport_rect()),
-    );
-    egui::Panel::top("menu").show(&mut root, |ui| {
+    egui::Panel::top("menu").show(root, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 if ui.button("Open\u{2026}").clicked() {
@@ -306,8 +311,10 @@ fn menu_bar(
                 }
             });
             ui.separator();
+            // Which scene is open is said in the bar at the bottom, where
+            // there is room for it; the top bar only says how much is in it.
             let actors = working.0.as_ref().map_or(0, |scene| scene.actors.len());
-            ui.label(format!("{} \u{2014} {actors} actors", open.path));
+            ui.label(format!("{actors} actors"));
         });
     });
 }
@@ -398,10 +405,6 @@ fn actor_list(
     sweep: &mut ListSweep,
 ) {
     let count = scene.actors.len();
-    // Which row the pointer is over, which is what tells the two menus
-    // apart: a right-click on a name is about that actor, anywhere else
-    // in the window — beside a name, under the list — is about the list.
-    let mut over_row = None;
     // Whether the pointer travelled far enough to be a sweep rather than a
     // click, worked out before the rows are drawn: a row whose click lands
     // on the frame a sweep ends would otherwise select itself out of the
@@ -415,14 +418,14 @@ fn actor_list(
         .resizable(true)
         .show(ctx, |ui| {
             // One interact over the whole body, made before the rows so a
-            // name takes click priority over the background beside it: egui
+            // name takes the clicks from the background beside it: egui
             // gives click interest to the last widget whose rect holds the
             // pointer.
             //
             // It cannot be the window's own response. A movable egui window
             // carries Sense::DRAG, which in egui 0.36 is DRAG|FOCUSABLE and
-            // no click at all, and the menu below opens on a secondary
-            // click — so hanging it there made right-click do nothing.
+            // no click at all, and a menu opens on a secondary click — so
+            // hanging one there made right-click do nothing at all.
             let body = ui.interact(ui.max_rect(), ui.id().with("body"), egui::Sense::click());
             let pointer_at = ctx.input(|input| input.pointer.interact_pos());
             let shift = ctx.input(|input| input.modifiers.shift);
@@ -436,11 +439,10 @@ fn actor_list(
             }
 
             if count == 0 {
-                ui.label("None yet. Right-click to add one.");
+                ui.label("None yet. Right-click here to add one.");
             }
-            // The rows' rectangles, for the sweep to test against. Filled
-            // in as they are drawn, since that is when a row's size is
-            // known.
+            // The rows' rectangles, for the sweep to test against, filled
+            // in as they are drawn since that is when a row's size is known.
             let mut rows: Vec<(usize, egui::Rect)> = Vec::with_capacity(count);
             for index in 0..count {
                 let name = actor_label(&scene.actors[index]);
@@ -448,17 +450,32 @@ fn actor_list(
                 if !(dragged && just_released) && row.clicked() {
                     pick(selected, index, shift);
                 }
-                if row.contains_pointer() {
-                    over_row = Some(index);
+                if row.secondary_clicked() {
+                    // A right-click on a name means that actor, whether or
+                    // not a left click had selected it first.
+                    selected.only(index);
                 }
-                rows.push((index, row.rect));
+                // The row's own menu, on the row's own response, because the
+                // body's interact below has already given the click to this
+                // widget: egui delivers a click to the last widget whose
+                // rect holds the pointer, and a menu hung anywhere else
+                // would never see one.
+                let rect = row.rect;
+                row.context_menu(|ui| {
+                    copy_item(ui, selected, scene, clipboard);
+                    delete_item(ui, selected, scene);
+                });
+                rows.push((index, rect));
             }
 
             // A drag that never left where it started is a click, and the
             // row under it has already had its say above.
             if dragged && just_released {
                 selected.sweep(
-                    egui::Rect::from_two_pos(sweep.from.unwrap_or_default(), pointer_at.unwrap_or_default()),
+                    egui::Rect::from_two_pos(
+                        sweep.from.unwrap_or_default(),
+                        pointer_at.unwrap_or_default(),
+                    ),
                     rows.iter().copied(),
                     shift,
                 );
@@ -476,30 +493,22 @@ fn actor_list(
                 );
             }
 
+            // The list's menu: what can be done to the scene around the
+            // actors, wherever the click lands that is not on a name.
             body.context_menu(|ui| {
-                if let Some(index) = over_row {
-                    selected.only(index);
+                copy_item(ui, selected, scene, clipboard);
+                if ui
+                    .add_enabled(!clipboard.0.is_empty(), egui::Button::new("Paste"))
+                    .clicked()
+                {
+                    paste_into(scene, clipboard, pointer, selected);
                 }
-                if over_row.is_some() {
-                    // The actor's own menu: only what can be done to it.
-                    copy_item(ui, selected, scene, clipboard);
-                    delete_item(ui, selected, scene);
-                } else {
-                    // The list's: what can be done to the scene around them.
-                    copy_item(ui, selected, scene, clipboard);
-                    if ui
-                        .add_enabled(!clipboard.0.is_empty(), egui::Button::new("Paste"))
-                        .clicked()
-                    {
-                        paste_into(scene, clipboard, pointer, selected);
-                    }
-                    ui.separator();
-                    ui.label("Add");
-                    for model in &models.0 {
-                        if ui.button(short_name(model)).clicked() {
-                            scene.actors.push(new_actor(model, pointer));
-                            selected.only(scene.actors.len() - 1);
-                        }
+                ui.separator();
+                ui.label("Add");
+                for model in &models.0 {
+                    if ui.button(short_name(model)).clicked() {
+                        scene.actors.push(new_actor(model, pointer));
+                        selected.only(scene.actors.len() - 1);
                     }
                 }
             });
@@ -529,8 +538,8 @@ fn delete_item(ui: &mut egui::Ui, selected: &mut Selected, scene: &mut Scene) {
 /// small enough that clicking one row never selects the block.
 pub const CLICK_SLOP: f32 = 6.0;
 
-/// A sweep being dragged down the list: where it started, and whether the
-/// button was down on the last frame.
+/// A sweep being dragged down the actors list: where it started, and
+/// whether the button was down on the last frame.
 ///
 /// The button state is carried rather than read as an edge because egui
 /// reports a press and a release landing in the same frame as one click,
@@ -729,19 +738,33 @@ pub fn move_group(actors: &mut [Actor], selected: &Selected, dx: f32, dz: f32) {
     }
 }
 
-/// The status line: what the last save did, and which file it did it to.
-fn status_line(ctx: &egui::Context, status: &Status, open: &OpenScene) {
-    egui::Window::new("Scene")
-        .default_pos(docked(STATUS_TOP))
-        .resizable(false)
-        .collapsible(false)
-        .show(ctx, |ui| {
-            ui.label(format!("file: {}", open.path));
-            if !status.0.is_empty() {
-                ui.separator();
-                ui.label(&status.0);
-            }
+/// A bar across the bottom of the window: which scene is open, and what
+/// was last done to it.
+///
+/// Not a window. A bar cannot be moved out of the way, closed by accident,
+/// or lost under the actor list, and it sits where a program's status
+/// always is.
+fn status_bar(root: &mut egui::Ui, status: &Status, open: &OpenScene) {
+    egui::Panel::bottom("status").show(root, |ui| {
+        ui.horizontal(|ui| {
+            // Claiming the rest of the row is what puts the two ends of it
+            // apart: without it a horizontal is only as wide as its
+            // contents, and the two labels sit next to each other.
+            ui.set_width(ui.available_width());
+            // An empty status would take no space, and a bar that jumps
+            // taller when something is said is a bar that rearranges
+            // everything above it.
+            let said = if status.0.is_empty() {
+                "Ready"
+            } else {
+                status.0.as_str()
+            };
+            ui.label(said);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(format!("Open scene: {}", open.path));
+            });
         });
+    });
 }
 
 /// File > Open: every scene file in the folder, click to switch to it.
