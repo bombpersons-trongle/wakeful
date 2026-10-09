@@ -14,6 +14,7 @@ mod scripts;
 mod systems;
 mod text;
 mod transition;
+mod walkmesh;
 mod world_state;
 
 use bevy::gltf::Gltf;

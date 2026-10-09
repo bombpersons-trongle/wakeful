@@ -1,9 +1,8 @@
 //! In-game scene editor.
 //!
 //! Toggle with `E`: an egui panel over the game view for editing the live
-//! scene asset in place — camera pose, background image, character model,
-//! and the walkable grid (painted with the mouse via a raycast onto the
-//! ground plane). Scenes save back to their RON file.
+//! scene asset in place — camera pose, background image and depth map.
+//! Scenes save back to their RON file.
 //!
 //! Because edits go straight into the `Assets<Scene>` entry, gameplay picks
 //! them up immediately; there is no separate editor state to reconcile.
@@ -11,46 +10,32 @@
 use std::path::PathBuf;
 
 use bevy::prelude::*;
-use bevy::window::PrimaryWindow;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
+use crate::CurrentScene;
+use crate::GameCameraQuery;
 use crate::assets::assets_root;
-use crate::scene::{CameraPose, Scene, WalkableGrid};
+use crate::scene::{CameraPose, Scene};
 use crate::screen;
-use crate::systems::debug_draw::{draw_teleporters, draw_walkable_grid};
-use crate::{CurrentScene, GameCamera, GameCameraQuery, Player};
-
-/// Read-only camera access for picking rays in the editor.
-type GameCameraRefs<'w, 's> =
-    Query<'w, 's, (&'static Camera, &'static GlobalTransform), (With<GameCamera>, Without<Player>)>;
+use crate::systems::debug_draw::{draw_teleporters, draw_walk_mesh};
 
 /// Toggles the editor. Safe to use for movement: the player walks with the
 /// arrow keys, typing goes to egui fields only while the editor is open.
 const TOGGLE_KEY: KeyCode = KeyCode::KeyE;
 
-/// Geometry of a freshly added walkable grid, sized to fit the placeholder
-/// ground plane.
-const NEW_GRID_ORIGIN: [f32; 2] = [-4.0, -4.0];
-const NEW_GRID_CELL: f32 = 1.0;
-const NEW_GRID_COLS: usize = 8;
-const NEW_GRID_ROWS: usize = 8;
-
 pub fn plugin(app: &mut App) {
     app.add_plugins(EguiPlugin::default())
         .insert_resource(EditorState::default())
         .add_systems(Startup, open_from_env)
-        // Panel/paint/overlay run inside the egui pass so widget state
-        // (wants-pointer etc.) is current when painting is evaluated.
-        .add_systems(EguiPrimaryContextPass, (ui, paint, overlay).chain())
+        // Panel and overlay run inside the egui pass so widget state
+        // (wants-pointer etc.) is current as the panel is built.
+        .add_systems(EguiPrimaryContextPass, (ui, overlay).chain())
         .add_systems(Update, (toggle, sync_camera).chain());
 }
 
 #[derive(Resource, Default)]
 pub(crate) struct EditorState {
     pub(crate) open: bool,
-    /// Walkable value being painted during an active stroke: `Some(true)`
-    /// for a left-drag, `Some(false)` for a right-drag, `None` when idle.
-    painting: Option<bool>,
     background_field: String,
     status: Option<String>,
 }
@@ -67,61 +52,6 @@ fn save_scene(scene: &Scene, asset_path: &str) -> std::io::Result<PathBuf> {
     let ron = scene_to_ron(scene).map_err(std::io::Error::other)?;
     std::fs::write(&path, ron)?;
     Ok(path)
-}
-
-/// Window cursor position (logical px) mapped into game-texture pixels,
-/// undoing the letterbox math of the present camera (which sizes the
-/// picture from the logical window size — see `screen::resize_present`).
-/// Returns `None` when the cursor sits on a black bar or outside the window.
-pub fn cursor_to_game(
-    cursor_logical: Vec2,
-    scale_factor: f32,
-    window_physical: UVec2,
-    game: UVec2,
-) -> Option<Vec2> {
-    let scale = screen::fit_scale(window_physical, game);
-    let presented = screen::presented_size(window_physical, game);
-    let offset = (window_physical.as_vec2() - presented) / 2.0;
-    let game_px = (cursor_logical * scale_factor - offset) / scale;
-    if game_px.x < 0.0
-        || game_px.y < 0.0
-        || game_px.x >= game.x as f32
-        || game_px.y >= game.y as f32
-    {
-        return None;
-    }
-    Some(game_px)
-}
-
-/// Intersects a ray with the ground plane (`y = 0`), returning world XZ.
-/// `None` for rays that point up or start at/behind the plane.
-pub fn raycast_ground(origin: Vec3, dir: Vec3) -> Option<Vec2> {
-    if dir.y >= 0.0 {
-        return None;
-    }
-    let t = -origin.y / dir.y;
-    if t <= 0.0 {
-        return None;
-    }
-    Some(Vec2::new(origin.x + dir.x * t, origin.z + dir.z * t))
-}
-
-/// Remaps row-major cell flags to a new grid size, preserving the cells
-/// that exist in both grids.
-pub fn resize_cells(
-    cells: &[bool],
-    old_cols: usize,
-    old_rows: usize,
-    new_cols: usize,
-    new_rows: usize,
-) -> Vec<bool> {
-    let mut out = vec![false; new_cols * new_rows];
-    for row in 0..old_rows.min(new_rows) {
-        for col in 0..old_cols.min(new_cols) {
-            out[row * new_cols + col] = cells.get(row * old_cols + col).copied().unwrap_or(false);
-        }
-    }
-    out
 }
 
 fn toggle(
@@ -225,8 +155,6 @@ fn ui(
         ui.separator();
         background_ui(ui, &mut scene, &mut state.background_field);
         ui.separator();
-        walkable_ui(ui, &mut scene);
-        ui.separator();
         save_ui(ui, &scene, &current.path, &mut state.status);
     });
 }
@@ -286,66 +214,6 @@ fn background_ui(ui: &mut egui::Ui, scene: &mut Scene, field: &mut String) {
     }
 }
 
-fn walkable_ui(ui: &mut egui::Ui, scene: &mut Scene) {
-    ui.label("Walkable grid (paint on the ground: left = walk, right = block)");
-    let Some(grid) = &mut scene.walkable else {
-        if ui.button("Add grid").clicked() {
-            scene.walkable = Some(WalkableGrid {
-                origin: NEW_GRID_ORIGIN,
-                cell_size: NEW_GRID_CELL,
-                cols: NEW_GRID_COLS,
-                rows: NEW_GRID_ROWS,
-                cells: vec![false; NEW_GRID_COLS * NEW_GRID_ROWS],
-            });
-        }
-        return;
-    };
-
-    let mut origin = grid.origin;
-    let mut cell_size = grid.cell_size;
-    let mut cols = grid.cols as isize;
-    let mut rows = grid.rows as isize;
-    ui.horizontal(|ui| {
-        ui.monospace("origin");
-        ui.add(
-            egui::DragValue::new(&mut origin[0])
-                .prefix("x ")
-                .speed(0.25),
-        );
-        ui.add(
-            egui::DragValue::new(&mut origin[1])
-                .prefix("z ")
-                .speed(0.25),
-        );
-    });
-    ui.horizontal(|ui| {
-        ui.monospace("cell");
-        ui.add(
-            egui::DragValue::new(&mut cell_size)
-                .range(0.1..=8.0)
-                .speed(0.05),
-        );
-        ui.monospace("grid");
-        ui.add(egui::DragValue::new(&mut cols).range(1..=64));
-        ui.add(egui::DragValue::new(&mut rows).range(1..=64));
-    });
-    if origin != grid.origin {
-        grid.origin = origin;
-    }
-    if cell_size > 0.0 && cell_size != grid.cell_size {
-        grid.cell_size = cell_size;
-    }
-    let (cols, rows) = (cols.max(1) as usize, rows.max(1) as usize);
-    if (cols, rows) != (grid.cols, grid.rows) {
-        grid.cells = resize_cells(&grid.cells, grid.cols, grid.rows, cols, rows);
-        grid.cols = cols;
-        grid.rows = rows;
-    }
-    if ui.button("Remove grid").clicked() {
-        scene.walkable = None;
-    }
-}
-
 fn save_ui(ui: &mut egui::Ui, scene: &Scene, asset_path: &str, status: &mut Option<String>) {
     if ui.button("Save scene").clicked() {
         *status = Some(match save_scene(scene, asset_path) {
@@ -365,73 +233,8 @@ fn trimmed_path(field: &str) -> Option<String> {
     (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
-fn paint(
-    mut ctxs: EguiContexts,
-    buttons: Res<ButtonInput<MouseButton>>,
-    windows: Query<&Window, With<PrimaryWindow>>,
-    cameras: GameCameraRefs,
-    mut scenes: ResMut<Assets<Scene>>,
-    current: Option<Res<CurrentScene>>,
-    mut state: ResMut<EditorState>,
-) {
-    if buttons.just_pressed(MouseButton::Left) {
-        state.painting = Some(true);
-    }
-    if buttons.just_pressed(MouseButton::Right) {
-        state.painting = Some(false);
-    }
-    if buttons.any_just_released([MouseButton::Left, MouseButton::Right]) {
-        state.painting = None;
-    }
-    let Some(value) = state.painting else {
-        return;
-    };
-    if !state.open {
-        state.painting = None;
-        return;
-    }
-    let Ok(ctx) = ctxs.ctx_mut() else {
-        return;
-    };
-    if ctx.egui_wants_pointer_input() {
-        return;
-    }
-
-    let Some(mut scene) = current.as_ref().and_then(|c| scenes.get_mut(&c.handle)) else {
-        return;
-    };
-    let Some(grid) = &mut scene.walkable else {
-        return;
-    };
-    let Ok((camera, camera_transform)) = cameras.single() else {
-        return;
-    };
-    let Ok(window) = windows.single() else {
-        return;
-    };
-    let Some(cursor) = window.cursor_position() else {
-        return;
-    };
-    let Some(game_px) = cursor_to_game(
-        cursor,
-        window.scale_factor(),
-        window.physical_size(),
-        screen::game_size(),
-    ) else {
-        return;
-    };
-    let Ok(ray) = camera.viewport_to_world(camera_transform, game_px) else {
-        return;
-    };
-    let Some(hit) = raycast_ground(ray.origin, *ray.direction) else {
-        return;
-    };
-    grid.set_walkable(hit.x, hit.y, value);
-}
-
-/// Draws the scene's overlays on the ground while editing: walkable cells
-/// bright, blocked dim, teleporter triggers orange. Same rendering as the
-/// F2 debug overlay.
+/// Draws the scene's overlays while editing: the walk mesh in green,
+/// teleporter triggers orange. Same rendering as the F2 debug overlay.
 fn overlay(
     state: Option<Res<EditorState>>,
     scenes: Res<Assets<Scene>>,
@@ -447,8 +250,8 @@ fn overlay(
     let Some(scene) = current.as_ref().and_then(|c| scenes.get(&c.handle)) else {
         return;
     };
-    if let Some(grid) = &scene.walkable {
-        draw_walkable_grid(&mut gizmos, grid);
+    if let Some(mesh) = &scene.walk_mesh {
+        draw_walk_mesh(&mut gizmos, mesh);
     }
     draw_teleporters(&mut gizmos, &scene.teleporters);
 }
@@ -458,127 +261,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ray_hits_the_ground_ahead() {
-        let hit = raycast_ground(Vec3::new(0.0, 6.0, 9.0), Vec3::new(0.0, -1.0, 0.0));
-        assert_eq!(hit, Some(Vec2::new(0.0, 9.0)));
-    }
-
-    #[test]
-    fn ray_hits_where_it_points() {
-        // looking from above toward -Z: the hit is along the ray
-        let hit = raycast_ground(Vec3::new(0.0, 9.0, 0.0), Vec3::new(0.0, -1.0, -1.0));
-        assert_eq!(hit, Some(Vec2::new(0.0, -9.0)));
-    }
-
-    #[test]
-    fn rays_pointing_up_miss() {
-        assert_eq!(raycast_ground(Vec3::Y, Vec3::Y), None);
-    }
-
-    #[test]
-    fn rays_parallel_to_the_ground_miss() {
-        assert_eq!(raycast_ground(Vec3::Y, Vec3::X), None);
-    }
-
-    #[test]
-    fn rays_away_from_the_ground_miss() {
-        // origin below the plane, heading further down
-        assert_eq!(raycast_ground(Vec3::new(0.0, -1.0, 0.0), Vec3::NEG_Y), None);
-    }
-
-    #[test]
-    fn cursor_maps_through_the_letterbox() {
-        let game = UVec2::new(640, 480);
-        // 1280x960 window: 2x scale, no bars; center of the game view
-        let center = cursor_to_game(Vec2::new(640.0, 480.0), 1.0, UVec2::new(1280, 960), game);
-        assert_eq!(center, Some(Vec2::new(320.0, 240.0)));
-    }
-
-    #[test]
-    fn cursor_on_the_bars_maps_to_nothing() {
-        let game = UVec2::new(640, 480);
-        // 1000x900 window: fit scale 1.5625 puts 75px of black at the
-        // top and bottom; a point on the upper bar maps outside the game.
-        let bar = cursor_to_game(Vec2::new(500.0, 40.0), 1.0, UVec2::new(1000, 900), game);
-        assert_eq!(bar, None);
-    }
-
-    #[test]
-    fn cursor_maps_through_a_fractional_fit() {
-        let game = UVec2::new(640, 480);
-        // 800x600 window: exactly 1.25x — the picture fills the window
-        // with no bars, so the window center is the game center.
-        let center = cursor_to_game(Vec2::new(400.0, 300.0), 1.0, UVec2::new(800, 600), game);
-        assert_eq!(center, Some(Vec2::new(320.0, 240.0)));
-    }
-
-    #[test]
-    fn cursor_accounts_for_scale_factor() {
-        let game = UVec2::new(640, 480);
-        // 2x window scale (HiDPI): logical 640x480 equals physical 1280x960
-        let center = cursor_to_game(Vec2::new(320.0, 240.0), 2.0, UVec2::new(1280, 960), game);
-        assert_eq!(center, Some(Vec2::new(320.0, 240.0)));
-    }
-
-    #[test]
-    fn cursor_agrees_with_the_presented_size_on_hidpi() {
-        // Pins cursor_to_game against the sprite sizing of resize_present
-        // (which scales from the logical window size): the cursor on the
-        // presented picture's top-left corner must sample game pixel
-        // (0, 0), and the top-left of the last game pixel (319, 239).
-        let window = UVec2::new(1400, 1000); // physical
-        let scale = 2.0;
-        let game = screen::game_size();
-        let logical = UVec2::new(
-            (window.x as f32 / scale) as u32,
-            (window.y as f32 / scale) as u32,
-        );
-        let presented = screen::presented_size(logical, game);
-        let offset = (logical.as_vec2() - presented) / 2.0;
-        let game_pixel = presented / game.as_vec2();
-
-        assert_eq!(
-            cursor_to_game(offset, scale, window, game),
-            Some(Vec2::ZERO)
-        );
-        // Fractional scales leave float dust on the last-pixel corner,
-        // so compare with a tolerance instead of exact equality.
-        let last = cursor_to_game(offset + presented - game_pixel, scale, window, game);
-        assert!(last.is_some());
-        assert!(last.unwrap().abs_diff_eq(Vec2::new(319.0, 239.0), 1e-2));
-    }
-
-    #[test]
-    fn resize_preserves_the_overlap() {
-        let cells = resize_cells(&[true, false, false, true], 2, 2, 3, 2);
-        // first two columns of each row survive, third column is new
-        assert_eq!(cells, [true, false, false, false, true, false]);
-    }
-
-    #[test]
-    fn resize_shrinks_dropping_out_of_range_cells() {
-        let cells = resize_cells(&[true, false, false, true], 2, 2, 1, 1);
-        assert_eq!(cells, [true]);
-    }
-
-    #[test]
-    fn resize_tolerates_short_input() {
-        let cells = resize_cells(&[true], 2, 2, 2, 2);
-        assert_eq!(cells, [true, false, false, false]);
-    }
-
-    #[test]
     fn scenes_round_trip_through_ron() {
         let src = r#"(
             background: Some("backgrounds/room1.png"),
             camera: (position: (0.0, 6.0, 9.0), target: (0.0, 0.0, 0.0), fov_degrees: 45.0),
-            walkable: Some((
-                origin: (-2.0, -2.0),
-                cell_size: 1.0,
-                cols: 2,
-                rows: 2,
-                cells: [true, false, false, true],
-            )),
+            depth_map: Some("backgrounds/room1_depth.png"),
         )"#;
         let scene: Scene = ron::from_str(src).unwrap();
         let text = scene_to_ron(&scene).unwrap();
@@ -586,9 +273,7 @@ mod tests {
         assert_eq!(reparsed.camera.position, scene.camera.position);
         assert_eq!(reparsed.camera.fov_degrees, scene.camera.fov_degrees);
         assert_eq!(reparsed.background, scene.background);
-        let grid = reparsed.walkable.unwrap();
-        assert_eq!(grid.cols, 2);
-        assert_eq!(grid.cells, [true, false, false, true]);
+        assert_eq!(reparsed.depth_map, scene.depth_map);
     }
 
     #[test]

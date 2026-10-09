@@ -4,21 +4,7 @@
         target: (-1.09468, 0.56379, -2.21895),
         fov_degrees: 49.92558,
     ),
-    walkable: Some((
-        origin: (-2.5, -2.5),
-        cell_size: 1.0,
-        cols: 5,
-        rows: 5,
-        // The player spawns at the center cell, so that one stays
-        // walkable; blocked corners demo the clamping.
-        cells: [
-            false, true, true, true, true,
-            true, true, true, true, true,
-            true, true, true, true, true,
-            true, true, true, true, true,
-            true, true, true, true, false,
-        ],
-    )),
+    walk_mesh: None,
     background: Some("backgrounds/devroom.png"),
     // A Blender-authored plate (raw_assets/scenes/village_1.blend, via
     // tools/generate_scene.py at 640x480): the room renders bigger than
@@ -27,47 +13,26 @@
     depth_map: Some("backgrounds/devroom_depth.png"),
     depth_range: 19.0,
     pan: Some((plate: (640, 480), window: (320, 240))),
-    // Actors: the goblin trails the player and counts your meetings;
-    // the two chests share one script but carry their own identity
-    // (private memory) and contents (params.item).
-    actors: [
-        (
-            model: "models/goblin.glb",
-            position: (-2.0, 2.0),
-            id: Some("goblin"),
-            script: Some("scripts/goblin.rhai"),
-        ),
-        (
-            model: "models/chest.glb",
-            position: (-1.5, -0.5),
-            id: Some("entrance-chest"),
-            params: {"item": "a health potion"},
-            // Front to the camera: the lid swings toward you and the
-            // open interior reads.
-            facing: Some(180.0),
-            script: Some("scripts/chest.rhai"),
-        ),
-        (
-            model: "models/chest.glb",
-            position: (1.5, -0.8),
-            id: Some("corner-chest"),
-            params: {"item": "an elixir"},
-            facing: Some(90.0),
-            script: Some("scripts/chest.rhai"),
-        ),
-    ],
-    // Test teleporter: walk right from the spawn point into the strip on
-    // the grid's east edge to jump to room2. Its arrival in room2 lands
-    // inside room2's return trigger: re-arm keeps it quiet until the
-    // player leaves the region and re-enters. The x keeps the player's
-    // body (radius 0.4) fully on the grid — closer to the edge and every
-    // constrained move gets rejected, leaving the player stuck.
+    // The cast lives in Village_Entrance, on real terrain; this room is
+    // the flat test bed, so nothing bounds movement here.
+    actors: [],
+    // Test teleporter: walk right from the spawn point into the strip to
+    // jump to room2. Its arrival in room2 lands inside room2's return
+    // trigger: re-arm keeps it quiet until the player leaves the region
+    // and re-enters. The other teleporter walks on into the village,
+    // where the mesh takes over.
     teleporters: [
         (
             position: (2.0, 0.0),
             size: (0.8, 2.0),
             target: "scenes/room2.scene",
             arrival: (-2.05, 0.0),
+        ),
+        (
+            position: (-2.0, -2.0),
+            size: (1.0, 1.0),
+            target: "scenes/Village_Entrance.scene",
+            arrival: (-28.3, -106.86),
         ),
     ],
 )

@@ -130,7 +130,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: vec![Teleporter {
                 position: [2.0, 0.0],
                 size: [2.0, 2.0],

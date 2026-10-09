@@ -71,6 +71,18 @@ Contributors work like any outside contributor — no special privileges:
   — full retro pixelation for 2D and 3D alike.
 - Movement runs on a fixed 60hz `FixedUpdate` schedule; the movement math in
   `movement.rs` is ECS-free and unit tested.
+- Walkable ground is a triangle mesh, not a cell grid (`src/walkmesh.rs`,
+  ECS-free and unit tested like `movement.rs`). A scene carries it as
+  `walk_mesh: Option<WalkMesh>` — vertices plus triangle indices, exported
+  by `tools/generate_scene.py` from the mesh objects inside the scene's
+  `Cameras` sub-collection (read through the depsgraph so modifiers apply,
+  welded at a millimeter). Characters FOLLOW its height
+  (`walkmesh::ground_height`), so slopes carry them; `WalkableGrid` is gone
+  and a scene without a mesh bounds nothing. Actors are constrained by
+  default and opt out per actor with `constrained: false`.
+- Note for anyone running `cargo fmt`: this branch is NOT rustfmt-clean
+  (123 pre-existing diffs), and there is no CI. Format the file you are
+  working in; never `cargo fmt --all` on top of a feature change.
 - Art direction: FF7-style — 3D characters over pre-rendered backgrounds.
   The ground plane is a placeholder until real background art exists.
 - The debug layer (`src/debug_shot.rs` + `src/debug_server.rs`, both

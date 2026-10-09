@@ -1,8 +1,8 @@
-// The devroom goblin: trails the player, stopping at a polite
+// The village goblin: trails the player, stopping at a polite
 // distance, and remarks on how many times you have met. The count
 // lives in this actor's private store — the scene gives it
 // id: Some("goblin"), which is the key — so it survives leaving the
-// room and coming back. The meeting itself is announced in the shared
+// scene and coming back. The meeting itself is announced in the shared
 // global store for other scripts to react to.
 //
 // Press cross while close to challenge the goblin: it builds the whole

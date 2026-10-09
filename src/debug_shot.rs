@@ -105,6 +105,7 @@ pub(crate) struct RenderDumpParams<'w, 's> {
         ),
         With<crate::systems::actor::Actor>,
     >,
+    players: Query<'w, 's, &'static GlobalTransform, With<crate::Player>>,
 }
 
 /// Loose scene peeks for the dump (visibilities/transforms/children
@@ -342,6 +343,9 @@ fn state_dump<'w, 's>(
                 *visibility == Visibility::Visible,
                 inherited.get()
             ));
+        }
+        for transform in &render.players {
+            lines.push(format!("player: at {:?}", transform.translation()));
         }
         if let Some(battle) = battle {
             lines.push(format!(

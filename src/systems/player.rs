@@ -9,31 +9,33 @@ use crate::movement::{
 };
 use crate::scene::Scene;
 use crate::systems::animation::Locomotion;
+use crate::walkmesh;
 use crate::{CurrentScene, Player};
 
 /// The placeholder's geometry: a cone lying on its side, apex (the nose)
-/// pointing along the facing direction. The radius also drives
-/// walkable-grid collision; shipped-scene tests assert arrivals fit a
-/// body of this size.
+/// pointing along the facing direction. The radius also drives walk-mesh
+/// collision; shipped-scene tests assert arrivals fit a body of this size.
 pub(crate) const PLAYER_RADIUS: f32 = 0.4;
 const PLAYER_LENGTH: f32 = 1.2;
-/// Resting height of the lying cone: its base rim touches the ground.
-/// Also the body height used whenever the scene application repositions
-/// the persistent player.
+/// Resting height of the lying cone above the ground: its base rim
+/// touches it. Added to the walk mesh's height whenever the scene
+/// application repositions the persistent player.
 pub(crate) const PLAYER_Y: f32 = PLAYER_RADIUS;
 const PLAYER_COLOR: Color = Color::srgb(0.949, 0.651, 0.306);
 
-/// Spawns the placeholder player at a world XZ position, facing `toward`
-/// (a ground-plane direction; usually the scene's camera forward, so the
-/// player starts pointing screen-up). Called by scene application, so
-/// every scene starts with a fresh player; teleporters pick the position
-/// via the scene's arrival data. The cone body is a pitched child — the
-/// entity itself stays upright so attached models stand straight.
+/// Spawns the placeholder player at a world XZ position, standing on
+/// `ground`, facing `toward` (a ground-plane direction; usually the
+/// scene's camera forward, so the player starts pointing screen-up).
+/// Called by scene application, so every scene starts with a fresh
+/// player; teleporters pick the position via the scene's arrival data.
+/// The cone body is a pitched child — the entity itself stays upright so
+/// attached models stand straight.
 pub(crate) fn spawn_player(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     materials: &mut Assets<StandardMaterial>,
     at: Vec2,
+    ground: f32,
     toward: Vec2,
 ) -> Entity {
     let player = commands
@@ -41,7 +43,7 @@ pub(crate) fn spawn_player(
             Player,
             Locomotion::default(),
             Visibility::default(),
-            Transform::from_xyz(at.x, PLAYER_Y, at.y).with_rotation(facing_rotation(toward)),
+            Transform::from_xyz(at.x, ground + PLAYER_Y, at.y).with_rotation(facing_rotation(toward)),
         ))
         .id();
     spawn_placeholder_body(commands, player, meshes, materials);
@@ -116,16 +118,16 @@ pub fn move_player(
     };
     let moved = move_position(from, direction, speed, time.delta_secs());
 
-    // The scene's walkable grid bounds where the player may go; the body
-    // (not just the center point) stays inside, and sliding along blocked
-    // cells keeps movement feeling responsive.
-    let moved = scene
-        .walkable
-        .as_ref()
-        .map(|grid| grid.constrain(from, moved, PLAYER_RADIUS))
+    // The scene's walk mesh bounds where the player may go and says how
+    // high the ground is there: the body (not just the center point) stays
+    // on it, and sliding along its edge keeps movement feeling responsive.
+    let mesh = scene.walk_mesh.as_ref();
+    let moved = mesh
+        .map(|mesh| mesh.constrain(from, moved, PLAYER_RADIUS))
         .unwrap_or(moved);
+    let ground = walkmesh::ground_height(mesh, moved.x, moved.y, from);
 
-    transform.translation = Vec3::new(moved.x, PLAYER_Y, moved.y);
+    transform.translation = Vec3::new(moved.x, ground + PLAYER_Y, moved.y);
     // Ease the nose toward the movement direction; idling keeps the last
     // facing. The gait follows actual displacement, so pushing into a
     // wall reads as standing, not speedwalking.

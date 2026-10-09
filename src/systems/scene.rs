@@ -16,6 +16,7 @@ use crate::systems::depth_card;
 use crate::systems::party::Party;
 use crate::systems::player;
 use crate::systems::ui::{UiApi, UiWindow, close_all};
+use crate::walkmesh;
 use crate::world_state::WorldState;
 use crate::{CurrentScene, GameCameraQuery, Ground, PendingTeleport, Player, PlayerModel, PlayerSpawn, SceneApplied, TeleporterArmed};
 
@@ -217,11 +218,14 @@ pub fn apply_scene(
     // after a transition. The player starts facing screen-up (away from
     // the camera).
     let at = spawn.map(|spawn| spawn.0).unwrap_or(Vec2::ZERO);
+    // The walk mesh decides how high the ground is under that spot, so a
+    // village slope does not leave the player hovering or buried.
+    let ground = walkmesh::ground_height(scene.walk_mesh.as_ref(), at.x, at.y, at);
     // The player persists across scenes; on first load there isn't one
     // yet, and it starts as the placeholder cone for the party to dress.
     match players.single_mut() {
         Ok(mut transform) => {
-            transform.translation = Vec3::new(at.x, player::PLAYER_Y, at.y);
+            transform.translation = Vec3::new(at.x, ground + player::PLAYER_Y, at.y);
             transform.rotation = facing_rotation(scene.camera_forward());
         }
         Err(_) => {
@@ -230,6 +234,7 @@ pub fn apply_scene(
                 &mut meshes,
                 &mut materials,
                 at,
+                ground,
                 scene.camera_forward(),
             );
             commands.entity(graphics.0).add_child(player);
@@ -435,7 +440,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: Vec::new(),
             depth_map: depth_map.map(str::to_string),
             depth_range: 32.0,
@@ -569,7 +574,7 @@ mod tests {
                 target: [0.0, 0.0, 0.0],
                 fov_degrees: 45.0,
             },
-            walkable: None,
+            walk_mesh: None,
             teleporters: vec![Teleporter {
                 position: [3.0, 4.0],
                 size: [1.0, 1.0],
