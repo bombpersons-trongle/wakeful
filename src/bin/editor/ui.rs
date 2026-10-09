@@ -342,10 +342,20 @@ fn actor_list(
     // apart: a right-click on a name is about that actor, anywhere else
     // in the window — beside a name, under the list — is about the list.
     let mut over_row = None;
-    let shown = egui::Window::new("Actors")
+    egui::Window::new("Actors")
         .default_pos(docked(ACTORS_TOP))
         .resizable(true)
         .show(ctx, |ui| {
+            // One interact over the whole body, made before the rows so a
+            // name takes click priority over the background beside it: egui
+            // gives click interest to the last widget whose rect holds the
+            // pointer.
+            //
+            // It cannot be the window's own response. A movable egui window
+            // carries Sense::DRAG, which in egui 0.36 is DRAG|FOCUSABLE and
+            // no click at all, and the menu below opens on a secondary
+            // click — so hanging it there made right-click do nothing.
+            let body = ui.interact(ui.max_rect(), ui.id().with("body"), egui::Sense::click());
             if count == 0 {
                 ui.label("None yet. Right-click to add one.");
             }
@@ -353,10 +363,7 @@ fn actor_list(
                 let name = actor_label(&scene.actors[index]);
                 let chosen = selected.0 == Some(index);
                 // The name and not the width of the window, so the space
-                // beside a name still belongs to the list. Selection is
-                // marked in the text rather than with a bar across the
-                // window, because a bar would have to be the width of the
-                // window to line up with the rows.
+                // beside a name still belongs to the list.
                 let row = ui.add(
                     egui::Label::new(if chosen { format!("> {name}") } else { name })
                         .sense(egui::Sense::click()),
@@ -368,43 +375,37 @@ fn actor_list(
                     over_row = Some(index);
                 }
             }
-        });
-    let Some(shown) = shown else {
-        return;
-    };
-    // One menu for the window, wherever the right-click lands: a list
-    // sized to its rows has no empty space below to aim at, and a menu
-    // that only appeared there is a menu nobody finds.
-    shown.response.context_menu(|ui| {
-        // A right-click on a name means that actor, whether or not a left
-        // click had selected it first.
-        if let Some(index) = over_row {
-            selected.0 = Some(index);
-        }
-        let chosen = selected.0.filter(|index| *index < count);
-        if over_row.is_some() {
-            // The actor's own menu: only what can be done to that actor.
-            copy_item(ui, chosen, scene, clipboard);
-            delete_item(ui, chosen, scene, selected);
-        } else {
-            // The list's: what can be done to the scene around them.
-            copy_item(ui, chosen, scene, clipboard);
-            if ui
-                .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
-                .clicked()
-            {
-                paste_into(scene, clipboard, pointer, selected);
-            }
-            ui.separator();
-            ui.label("Add");
-            for model in &models.0 {
-                if ui.button(short_name(model)).clicked() {
-                    scene.actors.push(new_actor(model, pointer));
-                    selected.0 = Some(scene.actors.len() - 1);
+            body.context_menu(|ui| {
+                // A right-click on a name means that actor, whether or not
+                // a left click had selected it first.
+                if let Some(index) = over_row {
+                    selected.0 = Some(index);
                 }
-            }
-        }
-    });
+                let chosen = selected.0.filter(|index| *index < count);
+                if over_row.is_some() {
+                    // The actor's own menu: only what can be done to it.
+                    copy_item(ui, chosen, scene, clipboard);
+                    delete_item(ui, chosen, scene, selected);
+                } else {
+                    // The list's: what can be done to the scene around them.
+                    copy_item(ui, chosen, scene, clipboard);
+                    if ui
+                        .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
+                        .clicked()
+                    {
+                        paste_into(scene, clipboard, pointer, selected);
+                    }
+                    ui.separator();
+                    ui.label("Add");
+                    for model in &models.0 {
+                        if ui.button(short_name(model)).clicked() {
+                            scene.actors.push(new_actor(model, pointer));
+                            selected.0 = Some(scene.actors.len() - 1);
+                        }
+                    }
+                }
+            });
+        });
 }
 
 /// Copying, offered only when there is an actor to copy.
