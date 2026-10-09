@@ -62,6 +62,16 @@ Contributors work like any outside contributor — no special privileges:
 
 - **wakeful** is a game built with Bevy 0.19 (edition 2024). `cargo run` to
   play, `cargo test` for unit tests.
+- Two binaries share a library. The game is `src/main.rs`; the scene
+  editor is `cargo run --bin editor -- scenes/Village_Entrance.scene`
+  (a free camera, the plate as geometry, the walk mesh drawn; F5 or
+  just re-exporting the blend reloads it — bevy's own file watcher is
+  not enabled, so the editor polls the file's write time). What both
+  must agree on lives in `src/lib.rs`: the scene format, the walk mesh,
+  the assets root, `depth_card_mesh`, and `scene_merge`. The game
+  re-exports those with `pub use wakeful::{…}` so `crate::scene::…`
+  keeps resolving; the old in-game egui editor is gone, and with it the
+  `bevy_egui` dependency.
 - Bevy systems live in `src/systems/<concern>.rs` (e.g. `camera.rs`,
   `debug_draw.rs`); `main.rs` only wires plugins, schedules, and the shared
   components/resources the systems operate on. Self-contained feature modules

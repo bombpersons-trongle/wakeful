@@ -7,7 +7,6 @@
 
 use bevy::prelude::*;
 
-use crate::editor::EditorState;
 use crate::game_state::GameState;
 use crate::scene::Scene;
 use crate::transition::{Effect, TransitionState};
@@ -55,16 +54,12 @@ pub fn check_teleporters(
     mut armed: Option<ResMut<TeleporterArmed>>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
-    editor: Option<Res<EditorState>>,
     pending: Option<Res<PendingTeleport>>,
     warp: Option<Res<PendingSceneWarp>>,
     mut transition: ResMut<TransitionState>,
     mut next_state: ResMut<NextState<GameState>>,
     players: Query<&Transform, With<Player>>,
 ) {
-    if editor.is_some_and(|editor| editor.open) {
-        return;
-    }
     if pending.is_some() || warp.is_some() {
         return;
     }
@@ -83,8 +78,8 @@ pub fn check_teleporters(
     // under the player fires and disarms until they leave and re-enter.
     let mut fired = None;
     for (index, teleporter) in scene.teleporters.iter().enumerate() {
-        // The editor can add teleporters mid-session; flags for them
-        // start armed.
+        // A teleporter with no flag yet arrived after the scene loaded
+        // (an edited file, a hot reload); it starts armed.
         if index >= armed.0.len() {
             armed.0.push(true);
         }
@@ -257,13 +252,27 @@ mod tests {
     }
 
     #[test]
-    fn editing_pauses_teleports() {
-        let (mut world, _) = world_with(Some(Vec3::new(2.0, 0.9, 0.0)));
-        let mut editor = EditorState::default();
-        editor.open = true;
-        world.insert_resource(editor);
-        world.run_system_once(check_teleporters).unwrap();
-        assert!(world.get_resource::<PendingSceneWarp>().is_none());
+    fn every_shipped_arrival_fits_the_player() {
+        // An arrival is where the player is placed with no further
+        // correction, and constrain rejects whole moves rather than
+        // stepping out, so an arrival whose body overhangs the walk mesh
+        // would leave the player stuck there for good.
+        for name in crate::scene::SHIPPED_SCENES {
+            let scene = crate::scene::read_shipped(name);
+            let Some(mesh) = &scene.walk_mesh else {
+                continue;
+            };
+            for (index, teleporter) in scene.teleporters.iter().enumerate() {
+                assert!(
+                    mesh.contains_circle(
+                        teleporter.arrival[0],
+                        teleporter.arrival[1],
+                        crate::systems::player::PLAYER_RADIUS
+                    ),
+                    "{name}: teleporter {index} arrives off the walk mesh"
+                );
+            }
+        }
     }
 
     #[test]

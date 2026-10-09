@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 description = "An RPG about identity and finding yourself"
 publish = false
+# `cargo run` with no arguments still means the game; the editor is
+# reached with `--bin editor`.
+default-run = "wakeful"
 
 [dependencies]
 bevy = "0.19"
@@ -12,8 +15,9 @@ bevy = "0.19"
 # dev tool render headless on software GL.
 bevy_render = { version = "0.19", default-features = false, features = ["gles"] }
 bevy_common_assets = { version = "0.17", features = ["ron"] }
-# In-game scene editor UI.
-bevy_egui = "0.42"
+# The scene editor is a separate binary (`cargo run --bin editor`), which
+# reads this same crate's library: the scene file, the walk mesh, the
+# assets root. The game itself carries no editor code.
 # Actor scripts: embedded, sandboxed scripting (no file/network access by
 # default); wired to the game by hand since bevy_mod_scripting doesn't
 # support Bevy 0.19 yet. `sync` makes ASTs/Scopes Send+Sync so they can

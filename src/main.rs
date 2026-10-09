@@ -1,21 +1,23 @@
-mod assets;
 mod battle;
 #[cfg(debug_assertions)]
 mod debug_shot;
 mod debug_server;
 mod display;
-mod editor;
 mod game_state;
 mod input;
 mod movement;
-mod scene;
 mod screen;
 mod scripts;
 mod systems;
 mod text;
 mod transition;
-mod walkmesh;
 mod world_state;
+
+// The scene format, the walkable ground it points at and the assets
+// root live in the library, because the editor is a second binary that
+// has to read exactly what the game writes. Re-exporting them here keeps
+// `crate::scene::…` resolving for every module below.
+pub use wakeful::{assets, depth_card_mesh, scene, walkmesh};
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
@@ -28,8 +30,7 @@ use crate::scene::Scene;
 use crate::systems::{
     actor, animation, bubble, camera, debug_draw, depth_card, input as sys_input, pan, party,
     player, scene as scene_loader, teleport, ui, world, world_script,
-};
-use std::path::Path;
+};use std::path::Path;
 
 /// Movement logic runs on a fixed step so behavior doesn't depend on
 /// display refresh rate or frame timing jitter.
@@ -145,7 +146,6 @@ fn main() {
     // re-enabling it needs its own verification pass.
     // .add_plugins(FullscreenMaterialPlugin::<display::FinalPostMaterial>::default())
     .add_plugins(Material2dPlugin::<bubble::GradientMaterial>::default())
-    .add_plugins(editor::plugin)
     .insert_resource(ClearColor(Color::srgb(0.10, 0.08, 0.13)))
     // bevy_gilrs only registers these when its backend starts, and
     // that can legitimately fail (no pad subsystem); empty ones

@@ -2,7 +2,6 @@
 
 use bevy::prelude::*;
 
-use crate::editor::EditorState;
 use crate::movement::{
     PLAYER_RUN_SPEED, PLAYER_SPEED, TURN_SPEED, camera_relative_direction, face_direction,
     facing_rotation, move_position,
@@ -82,14 +81,12 @@ pub fn move_player(
     captures: Res<crate::input::InputCaptures>,
     scenes: Res<Assets<Scene>>,
     current: Option<Res<CurrentScene>>,
-    editor: Option<Res<EditorState>>,
     pause: Res<crate::systems::ui::UiPause>,
     mut players: Query<(&mut Transform, Option<&mut Locomotion>), With<Player>>,
 ) {
-    // Editing pauses play: the mouse paints cells and the camera pose is
-    // whatever the panel says. Script UI can pause the world too — FF7
-    // menus freeze the field. Battles freeze it by state instead.
-    if editor.is_some_and(|editor| editor.open) || pause.0 {
+    // Script UI can pause the world — FF7 menus freeze the field.
+    // Battles freeze it by state instead.
+    if pause.0 {
         return;
     }
     let Ok((mut transform, locomotion)) = players.single_mut() else {

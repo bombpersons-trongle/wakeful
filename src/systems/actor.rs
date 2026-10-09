@@ -603,6 +603,110 @@ mod tests {
     }
 
     #[test]
+    fn the_shipped_actors_run_contract_abiding_scripts() {
+        // The demo cast lives in a village scene; every actor that IS
+        // shipped must be contract-abiding, and each character's contract
+        // holds whenever that character ships.
+        let scene = crate::scene::SHIPPED_SCENES
+            .iter()
+            .map(|name| crate::scene::read_shipped(name))
+            .find(|scene| !scene.actors.is_empty())
+            .expect("a shipped scene ships actors");
+
+        for actor in &scene.actors {
+            match actor.id.as_deref() {
+                Some("goblin") => {
+                    assert_eq!(actor.model, "models/goblin.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/goblin.rhai"));
+                }
+                Some("tester") => {
+                    assert_eq!(actor.model, "models/goblin.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/tester.rhai"));
+                }
+                Some("entrance-chest") | Some("corner-chest") => {
+                    assert_eq!(actor.model, "models/chest.glb");
+                    assert_eq!(actor.script.as_deref(), Some("scripts/chest.rhai"));
+                    assert!(actor.id.is_some(), "a chest without an id shares memory");
+                    assert!(!actor.shared, "chests are scene-local");
+                    let item = if actor.id.as_deref() == Some("entrance-chest") {
+                        "a health potion"
+                    } else {
+                        "an elixir"
+                    };
+                    assert_eq!(
+                        actor
+                            .params
+                            .get("item")
+                            .and_then(|v| v.clone().into_string().ok()),
+                        Some(item.to_owned())
+                    );
+                }
+                other => panic!("shipped actor with unknown id {other:?}"),
+            }
+        }
+
+        // The shipped scripts compile and answer the actor contract.
+        let mut scope = rhai::Scope::new();
+        if let Some(goblin) = scene
+            .actors
+            .iter()
+            .find(|a| a.id.as_deref() == Some("goblin"))
+        {
+            let goblin_script =
+                ActorScript::compile(include_str!("../../assets/scripts/goblin.rhai"))
+                    .expect("the shipped goblin script must compile");
+            // Far from the player the goblin closes in; close by it
+            // stays put. The player is a fixed distance north-east of
+            // wherever the goblin stands, so the step must close that gap.
+            let (goblin_x, goblin_z) = (goblin.position[0], goblin.position[1]);
+            let (player_x, player_z) = (goblin_x + 10.0, goblin_z - 10.0);
+            let moved = goblin_script
+                .update(&mut scope, goblin_x, goblin_z, player_x, player_z, 1.0 / 60.0)
+                .unwrap()
+                .position
+                .expect("the goblin approaches a far player");
+            assert!(moved[0] > goblin_x && moved[1] < goblin_z);
+            assert_eq!(
+                goblin_script
+                    .update(
+                        &mut scope,
+                        goblin_x,
+                        goblin_z,
+                        goblin_x,
+                        goblin_z,
+                        1.0 / 60.0,
+                    )
+                    .unwrap()
+                    .position,
+                None
+            );
+        }
+        if let Some(entrance) = scene
+            .actors
+            .iter()
+            .find(|a| a.id.as_deref() == Some("entrance-chest"))
+        {
+            let chest_script =
+                ActorScript::compile(include_str!("../../assets/scripts/chest.rhai"))
+                    .expect("the shipped chest script must compile");
+            // A chest with nobody nearby holds still and stays shut.
+            let (chest_x, chest_z) = (entrance.position[0], entrance.position[1]);
+            let tick = chest_script
+                .update(
+                    &mut scope,
+                    chest_x,
+                    chest_z,
+                    chest_x + 50.0,
+                    chest_z + 50.0,
+                    1.0 / 60.0,
+                )
+                .unwrap();
+            assert_eq!(tick.position, None);
+            assert!(tick.emote.is_none());
+        }
+    }
+
+    #[test]
     fn models_attach_when_their_gltf_loads() {
         let mut world = World::new();
         let mut gltfs = Assets::<Gltf>::default();

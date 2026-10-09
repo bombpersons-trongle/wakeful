@@ -4,10 +4,11 @@ use std::path::PathBuf;
 
 /// The assets folder name, relative to the repo (or however the
 /// executable was launched) so file access works no matter how the game
-/// is started. Shared by script loading, config loading, and the editor.
-pub(crate) const ASSETS_DIR: &str = "assets";
+/// is started. Shared by script loading, config loading, and the editor,
+/// which runs as its own binary against the same folder.
+pub const ASSETS_DIR: &str = "assets";
 
-pub(crate) fn assets_root() -> PathBuf {
+pub fn assets_root() -> PathBuf {
     if let Some(root) = std::env::var_os("BEVY_ASSET_ROOT") {
         return PathBuf::from(root);
     }
