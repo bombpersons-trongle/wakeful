@@ -40,9 +40,10 @@ fn docked(top: f32) -> egui::Pos2 {
     egui::pos2(DOCK_LEFT, top)
 }
 
-/// The last actor copied, for paste.
+/// The actors last copied, for paste. A copy of a selection brings all of
+/// it, and a paste puts back all of that.
 #[derive(Resource, Default)]
-pub struct Clipboard(Option<Actor>);
+pub struct Clipboard(Vec<Actor>);
 
 /// What the status line says: the path a save wrote, or why one failed.
 #[derive(Resource, Default)]
@@ -134,6 +135,7 @@ pub fn panels(
     mut open: ResMut<OpenScene>,
     mut shown: ResMut<Shown>,
     pointer: Res<GroundPointer>,
+    mut list_sweep: ResMut<ListSweep>,
     keys: Res<ButtonInput<KeyCode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
@@ -184,7 +186,15 @@ pub fn panels(
     let Some(scene) = working.0.as_mut() else {
         return;
     };
-    actor_list(ctx, scene, &mut selected, &mut clipboard, &models, &pointer);
+    actor_list(
+        ctx,
+        scene,
+        &mut selected,
+        &mut clipboard,
+        &models,
+        &pointer,
+        &mut list_sweep,
+    );
     properties(ctx, scene, &selected);
     status_line(ctx, &status, &open);
 }
@@ -251,20 +261,21 @@ fn menu_bar(
             });
             ui.menu_button("Edit", |ui| {
                 let mut asked = None;
+                let some = !selected.is_empty();
                 if ui
-                    .add_enabled(selected.0.is_some(), egui::Button::new("Copy actor"))
+                    .add_enabled(some, egui::Button::new("Copy"))
                     .clicked()
                 {
                     asked = Some(Edit::Copy);
                 }
                 if ui
-                    .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste actor"))
+                    .add_enabled(!clipboard.0.is_empty(), egui::Button::new("Paste"))
                     .clicked()
                 {
                     asked = Some(Edit::Paste);
                 }
                 if ui
-                    .add_enabled(selected.0.is_some(), egui::Button::new("Delete actor"))
+                    .add_enabled(some, egui::Button::new("Delete"))
                     .clicked()
                 {
                     asked = Some(Edit::Delete);
@@ -301,8 +312,7 @@ fn menu_bar(
     });
 }
 
-/// Carries out an edit to the actor list, leaving the selection pointing
-/// at whatever took the edited actor's place.
+/// Carries out an edit to the selection.
 fn apply_edit(
     edit: Edit,
     working: &mut Working,
@@ -314,34 +324,92 @@ fn apply_edit(
         return;
     };
     match edit {
-        Edit::Copy => {
-            if let Some(index) = selected.0 {
-                copy_actor(scene, index, clipboard);
-            }
-        }
+        Edit::Copy => copy_actors(scene, selected, clipboard),
         Edit::Paste => paste_into(scene, clipboard, pointer, selected),
-        Edit::Delete => {
-            if let Some(index) = selected.0 {
-                delete_actor(scene, index, selected);
-            }
-        }
+        Edit::Delete => delete_actors(scene, selected),
     }
 }
 
-/// The actor list, with its right-click menu.
+/// Copying takes the whole selection.
+fn copy_actors(scene: &Scene, selected: &Selected, clipboard: &mut Clipboard) {
+    clipboard.0 = selected
+        .picked()
+        .iter()
+        .filter_map(|index| scene.actors.get(*index).cloned())
+        .collect();
+}
+
+/// Deleting takes every selected actor out of the list and leaves nothing
+/// selected, since everything it could have pointed at is gone.
+///
+/// From the back, so the indices still mean what they did before the
+/// earlier removals shifted everything down.
+fn delete_actors(scene: &mut Scene, selected: &mut Selected) {
+    let mut picked: Vec<usize> = selected
+        .picked()
+        .iter()
+        .copied()
+        .filter(|index| *index < scene.actors.len())
+        .collect();
+    picked.sort_unstable();
+    picked.dedup();
+    for index in picked.into_iter().rev() {
+        scene.actors.remove(index);
+    }
+    selected.clear();
+}
+
+/// Pasting puts back every copied actor, standing beside where the camera
+/// looks, each with an id of its own, and selects the lot.
+fn paste_into(
+    scene: &mut Scene,
+    clipboard: &Clipboard,
+    pointer: &GroundPointer,
+    selected: &mut Selected,
+) {
+    if clipboard.0.is_empty() {
+        return;
+    }
+    let mut fresh = Vec::with_capacity(clipboard.0.len());
+    for copy in &clipboard.0 {
+        let held: Vec<Option<String>> = scene
+            .actors
+            .iter()
+            .chain(fresh.iter())
+            .map(|actor| actor.id.clone())
+            .collect();
+        fresh.push(paste_actor(copy.clone(), pointer, &held));
+    }
+    let first = scene.actors.len();
+    scene.actors.extend(fresh);
+    for index in first..scene.actors.len() {
+        selected.toggle(index);
+    }
+}
+
+/// The actor list, its selection, and its right-click menus.
 fn actor_list(
     ctx: &egui::Context,
     scene: &mut Scene,
     selected: &mut Selected,
     clipboard: &mut Clipboard,
     models: &Models,
-    pointer: &GroundPointer,
+    pointer: &Res<GroundPointer>,
+    sweep: &mut ListSweep,
 ) {
     let count = scene.actors.len();
     // Which row the pointer is over, which is what tells the two menus
     // apart: a right-click on a name is about that actor, anywhere else
     // in the window — beside a name, under the list — is about the list.
     let mut over_row = None;
+    // Whether the pointer travelled far enough to be a sweep rather than a
+    // click, worked out before the rows are drawn: a row whose click lands
+    // on the frame a sweep ends would otherwise select itself out of the
+    // very selection the sweep just made.
+    let dragged = sweep
+        .from
+        .zip(ctx.input(|input| input.pointer.interact_pos()))
+        .is_some_and(|(from, to)| (from - to).length() > CLICK_SLOP);
     egui::Window::new("Actors")
         .default_pos(docked(ACTORS_TOP))
         .resizable(true)
@@ -356,41 +424,71 @@ fn actor_list(
             // no click at all, and the menu below opens on a secondary
             // click — so hanging it there made right-click do nothing.
             let body = ui.interact(ui.max_rect(), ui.id().with("body"), egui::Sense::click());
+            let pointer_at = ctx.input(|input| input.pointer.interact_pos());
+            let shift = ctx.input(|input| input.modifiers.shift);
+            let down = ctx.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary));
+            let just_pressed = down && !sweep.was_down;
+            let just_released = !down && sweep.was_down;
+            sweep.was_down = down;
+
+            if just_pressed && pointer_at.is_some_and(|at| body.rect.contains(at)) {
+                sweep.from = pointer_at;
+            }
+
             if count == 0 {
                 ui.label("None yet. Right-click to add one.");
             }
+            // The rows' rectangles, for the sweep to test against. Filled
+            // in as they are drawn, since that is when a row's size is
+            // known.
+            let mut rows: Vec<(usize, egui::Rect)> = Vec::with_capacity(count);
             for index in 0..count {
                 let name = actor_label(&scene.actors[index]);
-                let chosen = selected.0 == Some(index);
-                // The name and not the width of the window, so the space
-                // beside a name still belongs to the list.
-                let row = ui.add(
-                    egui::Label::new(if chosen { format!("> {name}") } else { name })
-                        .sense(egui::Sense::click()),
-                );
-                if row.clicked() || row.secondary_clicked() {
-                    selected.0 = Some(index);
+                let row = actor_row(ui, &name, selected.contains(index));
+                if !(dragged && just_released) && row.clicked() {
+                    pick(selected, index, shift);
                 }
                 if row.contains_pointer() {
                     over_row = Some(index);
                 }
+                rows.push((index, row.rect));
             }
+
+            // A drag that never left where it started is a click, and the
+            // row under it has already had its say above.
+            if dragged && just_released {
+                selected.sweep(
+                    egui::Rect::from_two_pos(sweep.from.unwrap_or_default(), pointer_at.unwrap_or_default()),
+                    rows.iter().copied(),
+                    shift,
+                );
+            }
+            sweep.from = sweep.from.filter(|_| !just_released);
+            // The band, while it is being dragged.
+            if let (Some(from), Some(to)) = (sweep.from, pointer_at)
+                && (from - to).length() > CLICK_SLOP
+            {
+                ui.painter().rect_stroke(
+                    egui::Rect::from_two_pos(from, to),
+                    0.0,
+                    ui.visuals().selection.stroke,
+                    egui::StrokeKind::Middle,
+                );
+            }
+
             body.context_menu(|ui| {
-                // A right-click on a name means that actor, whether or not
-                // a left click had selected it first.
                 if let Some(index) = over_row {
-                    selected.0 = Some(index);
+                    selected.only(index);
                 }
-                let chosen = selected.0.filter(|index| *index < count);
                 if over_row.is_some() {
                     // The actor's own menu: only what can be done to it.
-                    copy_item(ui, chosen, scene, clipboard);
-                    delete_item(ui, chosen, scene, selected);
+                    copy_item(ui, selected, scene, clipboard);
+                    delete_item(ui, selected, scene);
                 } else {
                     // The list's: what can be done to the scene around them.
-                    copy_item(ui, chosen, scene, clipboard);
+                    copy_item(ui, selected, scene, clipboard);
                     if ui
-                        .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
+                        .add_enabled(!clipboard.0.is_empty(), egui::Button::new("Paste"))
                         .clicked()
                     {
                         paste_into(scene, clipboard, pointer, selected);
@@ -400,7 +498,7 @@ fn actor_list(
                     for model in &models.0 {
                         if ui.button(short_name(model)).clicked() {
                             scene.actors.push(new_actor(model, pointer));
-                            selected.0 = Some(scene.actors.len() - 1);
+                            selected.only(scene.actors.len() - 1);
                         }
                     }
                 }
@@ -408,57 +506,79 @@ fn actor_list(
         });
 }
 
-/// Copying, offered only when there is an actor to copy.
-fn copy_item(ui: &mut egui::Ui, chosen: Option<usize>, scene: &Scene, clipboard: &mut Clipboard) {
+/// Copying, offered only when something is selected to copy.
+fn copy_item(ui: &mut egui::Ui, selected: &Selected, scene: &Scene, clipboard: &mut Clipboard) {
     if ui
-        .add_enabled(chosen.is_some(), egui::Button::new("Copy"))
+        .add_enabled(!selected.is_empty(), egui::Button::new("Copy"))
         .clicked()
-        && let Some(index) = chosen
     {
-        copy_actor(scene, index, clipboard);
+        copy_actors(scene, selected, clipboard);
     }
 }
 
 /// Deleting, likewise.
-fn delete_item(ui: &mut egui::Ui, chosen: Option<usize>, scene: &mut Scene, selected: &mut Selected) {
-    if ui
-        .add_enabled(chosen.is_some(), egui::Button::new("Delete"))
-        .clicked()
-        && let Some(index) = chosen
-    {
-        delete_actor(scene, index, selected);
+fn delete_item(ui: &mut egui::Ui, selected: &mut Selected, scene: &mut Scene) {
+    let any = !selected.is_empty();
+    if ui.add_enabled(any, egui::Button::new("Delete")).clicked() {
+        delete_actors(scene, selected);
     }
 }
 
-/// Copying an actor takes the one it was copied from.
-fn copy_actor(scene: &Scene, index: usize, clipboard: &mut Clipboard) {
-    clipboard.0 = scene.actors.get(index).cloned();
+/// How far the pointer may travel between press and release and still
+/// count as a click rather than the start of a sweep, in logical pixels:
+/// small enough that clicking one row never selects the block.
+pub const CLICK_SLOP: f32 = 6.0;
+
+/// A sweep being dragged down the list: where it started, and whether the
+/// button was down on the last frame.
+///
+/// The button state is carried rather than read as an edge because egui
+/// reports a press and a release landing in the same frame as one click,
+/// and a sweep is something that happens across frames.
+#[derive(Resource, Default)]
+pub struct ListSweep {
+    from: Option<egui::Pos2>,
+    was_down: bool,
 }
 
-/// Deleting takes the actor out of the list, and deselects it: it is the
-/// actor the selection was pointing at that is now gone.
-fn delete_actor(scene: &mut Scene, index: usize, selected: &mut Selected) {
-    if scene.actors.get(index).is_some() {
-        scene.actors.remove(index);
-    }
-    if selected.0 == Some(index) {
-        selected.0 = None;
+/// Picking an actor: on its own it is the only selection, with shift it
+/// joins or leaves the others.
+fn pick(selected: &mut Selected, index: usize, shift: bool) {
+    if shift {
+        selected.toggle(index);
+    } else {
+        selected.only(index);
     }
 }
 
-/// Pasting adds a copy of whatever was copied, standing beside where the
-/// camera looks, and selects it.
-fn paste_into(
-    scene: &mut Scene,
-    clipboard: &Clipboard,
-    pointer: &GroundPointer,
-    selected: &mut Selected,
-) {
-    if let Some(copy) = clipboard.0.clone() {
-        let held: Vec<Option<String>> = scene.actors.iter().map(|a| a.id.clone()).collect();
-        scene.actors.push(paste_actor(copy, pointer, &held));
-        selected.0 = Some(scene.actors.len() - 1);
+/// One row: the actor's name, a selection bar behind it, and the click.
+///
+/// The row is as wide as its name and no wider, because the space beside
+/// a name belongs to the list rather than to that actor — and right-clicks
+/// there offer the list's menu, not the actor's.
+fn actor_row(ui: &mut egui::Ui, name: &str, chosen: bool) -> egui::Response {
+    let galley = ui.painter().layout_no_wrap(
+        name.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        if chosen {
+            ui.visuals().strong_text_color()
+        } else {
+            ui.visuals().text_color()
+        },
+    );
+    let height = ui.spacing().interact_size.y;
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(galley.size().x, height), egui::Sense::click());
+    if chosen {
+        ui.painter().rect_filled(
+            rect.expand(2.0),
+            4.0,
+            ui.visuals().selection.bg_fill,
+        );
     }
+    ui.painter()
+        .galley(rect.left_top(), galley, ui.visuals().text_color());
+    response
 }
 
 /// The last path segment of an asset path, which is what a model menu
@@ -523,30 +643,44 @@ fn unique_id(wanted: &str, taken: &[Option<String>]) -> String {
     unreachable!("a candidate is free by construction")
 }
 
-/// What the properties window shows for the selected actor, and the two
-/// numbers an editor actually moves: where it stands, and which way it
-/// faces.
+/// What the properties window shows, and the two numbers an editor
+/// actually moves: where an actor stands, and which way it faces.
+///
+/// The numbers belong to the primary — the most recently picked actor, and
+/// the only one with a name to put in the title — but an edit moves the
+/// whole selection, by the same amount, so a group keeps its shape instead
+/// of collapsing onto one spot.
 fn properties(ctx: &egui::Context, scene: &mut Scene, selected: &Selected) {
-    let Some(index) = selected.0 else {
+    let Some(primary) = selected.primary() else {
         return;
     };
-    let Some(actor) = scene.actors.get(index) else {
+    let Some(actor) = scene.actors.get(primary) else {
         return;
     };
+    let alone = selected.len() == 1;
     let mut position = actor.position;
     let mut facing = actor.facing;
-    egui::Window::new(format!("Actor: {}", actor_label(actor)))
+    let title = if alone {
+        format!("Actor: {}", actor_label(actor))
+    } else {
+        format!("{} actors", selected.len())
+    };
+    egui::Window::new(title)
         .default_pos(docked(PROPERTIES_TOP))
         .resizable(false)
         .show(ctx, |ui| {
-            ui.label(format!("model: {}", actor.model));
-            if let Some(script) = &actor.script {
-                ui.label(format!("script: {script}"));
+            if alone {
+                ui.label(format!("model: {}", actor.model));
+                if let Some(script) = &actor.script {
+                    ui.label(format!("script: {script}"));
+                }
+                if let Some(id) = &actor.id {
+                    ui.label(format!("id: {id}"));
+                }
+                ui.label(format!("constrained: {}", actor.constrained));
+            } else {
+                ui.label(format!("moving {} actors together", selected.len()));
             }
-            if let Some(id) = &actor.id {
-                ui.label(format!("id: {id}"));
-            }
-            ui.label(format!("constrained: {}", actor.constrained));
             ui.separator();
             egui::Grid::new("placement").num_columns(2).show(ui, |ui| {
                 ui.label("x");
@@ -555,20 +689,43 @@ fn properties(ctx: &egui::Context, scene: &mut Scene, selected: &Selected) {
                 ui.label("z");
                 ui.add(egui::DragValue::new(&mut position[1]).speed(0.05));
                 ui.end_row();
-                ui.label("facing");
-                // A model with no pinned facing shows the scene camera's,
-                // which is a number worth showing and editing: writing it
-                // in pins the actor to it.
-                let degrees = facing.get_or_insert(0.0);
-                ui.add(egui::DragValue::new(degrees).speed(0.5).range(0.0..=360.0));
-                ui.end_row();
+                // Facing is an angle, and an angle has no meaning as an
+                // offset: rotating a group is not a thing this window
+                // offers, so it belongs to the primary alone.
+                if alone {
+                    ui.label("facing");
+                    // A model with no pinned facing shows the scene
+                    // camera's, which is a number worth showing and
+                    // editing: writing it in pins the actor to it.
+                    let degrees = facing.get_or_insert(0.0);
+                    ui.add(egui::DragValue::new(degrees).speed(0.5).range(0.0..=360.0));
+                    ui.end_row();
+                }
             });
         });
     // The edits land on the editor's copy, which is what the models are
     // placed from; `sync_actors` writes them onto the standing actors.
-    if let Some(actor) = scene.actors.get_mut(index) {
-        actor.position = position;
-        actor.facing = facing;
+    let Some(shown) = scene.actors.get(primary) else {
+        return;
+    };
+    let (dx, dz) = (position[0] - shown.position[0], position[1] - shown.position[1]);
+    move_group(&mut scene.actors, selected, dx, dz);
+    if let Some(primary_actor) = scene.actors.get_mut(primary) {
+        primary_actor.facing = facing;
+    }
+}
+
+/// Shifts every selected actor by the same amount, so a group keeps its
+/// shape. The numbers a caller passes are a difference, not a place.
+pub fn move_group(actors: &mut [Actor], selected: &Selected, dx: f32, dz: f32) {
+    if dx == 0.0 && dz == 0.0 {
+        return;
+    }
+    for index in selected.picked() {
+        if let Some(actor) = actors.get_mut(*index) {
+            actor.position[0] += dx;
+            actor.position[1] += dz;
+        }
     }
 }
 
@@ -743,54 +900,47 @@ mod tests {
         }))
     }
 
+    /// A camera looking at `(3, ?, 4)`, which is where a paste lands.
+    fn pointer() -> GroundPointer {
+        GroundPointer(Some(Vec3::new(3.0, 0.0, 4.0)))
+    }
+
+    fn ids(actors: &[Actor]) -> Vec<Option<String>> {
+        actors.iter().map(|actor| actor.id.clone()).collect()
+    }
+
     #[test]
-    fn copying_takes_the_selected_actor() {
-        let mut copy = working(vec![actor(Some("goblin"))]);
-        let mut selected = Selected(Some(0));
+    fn copying_takes_the_whole_selection() {
+        let copy = working(vec![actor(Some("a")), actor(Some("b")), actor(Some("c"))]);
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.toggle(2);
         let mut clipboard = Clipboard::default();
-        apply_edit(
-            Edit::Copy,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
+        copy_actors(copy.0.as_ref().unwrap(), &selected, &mut clipboard);
         assert_eq!(
-            clipboard.0.as_ref().map(|a| a.id.clone()),
-            Some(Some("goblin".to_owned()))
+            clipboard.0.iter().filter_map(|a| a.id.as_deref()).collect::<Vec<_>>(),
+            ["a", "c"]
         );
     }
 
     #[test]
     fn copying_nothing_copies_nothing() {
-        let mut copy = working(vec![actor(Some("goblin"))]);
-        let mut selected = Selected(None);
+        let copy = working(vec![actor(Some("a"))]);
+        let selected = Selected::default();
         let mut clipboard = Clipboard::default();
-        apply_edit(
-            Edit::Copy,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
-        assert!(clipboard.0.is_none());
+        copy_actors(copy.0.as_ref().unwrap(), &selected, &mut clipboard);
+        assert!(clipboard.0.is_empty());
     }
 
     #[test]
-    fn pasting_adds_an_actor_after_the_last_and_selects_it() {
+    fn pasting_adds_every_copied_actor_and_selects_them_all() {
         let mut copy = working(vec![actor(Some("goblin"))]);
-        let mut selected = Selected(Some(0));
-        let mut clipboard = Clipboard(Some(actor(Some("goblin"))));
-        apply_edit(
-            Edit::Paste,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
-        let scene = copy.0.unwrap();
-        assert_eq!(scene.actors.len(), 2);
-        assert_eq!(selected.0, Some(1));
+        let mut scene = copy.0.take().unwrap();
+        let mut selected = Selected::default();
+        let clipboard = Clipboard(vec![actor(Some("goblin")), actor(None)]);
+        paste_into(&mut scene, &clipboard, &pointer(), &mut selected);
+        assert_eq!(scene.actors.len(), 3);
+        assert_eq!(selected.picked(), [1, 2]);
     }
 
     #[test]
@@ -798,69 +948,15 @@ mod tests {
         // Two actors sharing one id would share one script's memory, and
         // the copy would quietly overwrite the original's.
         let mut copy = working(vec![actor(Some("goblin"))]);
-        let mut selected = Selected(Some(0));
-        let mut clipboard = Clipboard(Some(actor(Some("goblin"))));
-        apply_edit(
-            Edit::Paste,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
+        let mut scene = copy.0.take().unwrap();
+        let mut selected = Selected::default();
+        paste_into(
+            &mut scene,
+            &Clipboard(vec![actor(Some("goblin"))]),
             &pointer(),
+            &mut selected,
         );
-        let scene = copy.0.unwrap();
         assert_eq!(scene.actors[1].id.as_deref(), Some("goblin.1"));
-    }
-
-    #[test]
-    fn deleting_takes_the_selected_actor_out() {
-        let mut copy = working(vec![actor(Some("a")), actor(Some("b")), actor(Some("c"))]);
-        let mut selected = Selected(Some(1));
-        let mut clipboard = Clipboard::default();
-        apply_edit(
-            Edit::Delete,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
-        let scene = copy.0.unwrap();
-        assert_eq!(scene.actors.len(), 2);
-        assert_eq!(scene.actors[1].id.as_deref(), Some("c"));
-        // The thing that was selected is the thing that is gone.
-        assert_eq!(selected.0, None);
-    }
-
-    #[test]
-    fn deleting_a_stale_selection_takes_nothing_but_still_selects_nothing() {
-        // A selection can outlive its actor: a scene reloaded from disk
-        // may be shorter than the list on screen was.
-        let mut copy = working(vec![actor(Some("a"))]);
-        let mut selected = Selected(Some(7));
-        let mut clipboard = Clipboard::default();
-        apply_edit(
-            Edit::Delete,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
-        assert_eq!(copy.0.unwrap().actors.len(), 1);
-        assert_eq!(selected.0, None);
-    }
-
-    #[test]
-    fn deleting_with_nothing_selected_changes_nothing() {
-        let mut copy = working(vec![actor(Some("a"))]);
-        let mut selected = Selected(None);
-        let mut clipboard = Clipboard::default();
-        apply_edit(
-            Edit::Delete,
-            &mut copy,
-            &mut selected,
-            &mut clipboard,
-            &pointer(),
-        );
-        assert_eq!(copy.0.unwrap().actors.len(), 1);
     }
 
     #[test]
@@ -879,6 +975,74 @@ mod tests {
     }
 
     #[test]
+    fn deleting_takes_the_whole_selection_out() {
+        let mut copy = working(vec![actor(Some("a")), actor(Some("b")), actor(Some("c"))]);
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.toggle(2);
+        let mut scene = copy.0.take().unwrap();
+        delete_actors(&mut scene, &mut selected);
+        // b survives, and the two that went took their indices with them:
+        // nothing left dangling, nothing left selected.
+        assert_eq!(ids(&scene.actors), [Some("b".to_owned())]);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn deleting_nothing_leaves_the_list_alone() {
+        let mut copy = working(vec![actor(Some("a"))]);
+        let mut scene = copy.0.take().unwrap();
+        let mut selected = Selected::default();
+        delete_actors(&mut scene, &mut selected);
+        assert_eq!(scene.actors.len(), 1);
+    }
+
+    #[test]
+    fn a_stale_selection_deletes_nothing_and_still_selects_nothing() {
+        // A selection can outlive its actor: a scene reloaded from disk may
+        // be shorter than the list on screen was.
+        let mut copy = working(vec![actor(Some("a"))]);
+        let mut selected = Selected::default();
+        selected.only(7);
+        let mut scene = copy.0.take().unwrap();
+        delete_actors(&mut scene, &mut selected);
+        assert_eq!(scene.actors.len(), 1);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn a_group_moves_by_the_same_amount_and_keeps_its_shape() {
+        let mut actors = vec![actor(None), actor(None), actor(None)];
+        actors[0].position = [-30.0, -100.0];
+        actors[1].position = [-12.0, -104.0];
+        actors[2].position = [-41.0, -96.0];
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.toggle(2);
+        // The properties window shows the primary's own number, so what
+        // reaches the list is a difference, not a place.
+        move_group(&mut actors, &selected, 10.0, 0.0);
+        assert_eq!(actors[0].position, [-20.0, -100.0]);
+        assert_eq!(actors[2].position, [-31.0, -96.0]);
+        // The one not selected stayed exactly where it was.
+        assert_eq!(actors[1].position, [-12.0, -104.0]);
+        // And the group is as spread out as it was.
+        assert_eq!(
+            actors[2].position[0] - actors[0].position[0],
+            -11.0
+        );
+    }
+
+    #[test]
+    fn a_group_that_did_not_move_is_left_alone() {
+        let mut actors = vec![actor(None)];
+        let mut selected = Selected::default();
+        selected.only(0);
+        move_group(&mut actors, &selected, 0.0, 0.0);
+        assert_eq!(actors[0].position, [1.0, 2.0]);
+    }
+
+    #[test]
     fn a_scene_name_that_would_escape_the_scenes_folder_is_refused() {
         assert!(valid_scene_name("Village_Entrance"));
         assert!(!valid_scene_name(""));
@@ -886,10 +1050,5 @@ mod tests {
         assert!(!valid_scene_name("../elsewhere"));
         assert!(!valid_scene_name("scenes/nested"));
         assert!(!valid_scene_name(".."));
-    }
-
-    /// A camera looking at `(3, ?, 4)`, which is where a paste lands.
-    fn pointer() -> GroundPointer {
-        GroundPointer(Some(Vec3::new(3.0, 0.0, 4.0)))
     }
 }

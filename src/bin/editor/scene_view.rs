@@ -18,6 +18,7 @@ use wakeful::assets::assets_root;
 use wakeful::depth_card_mesh;
 use wakeful::scene::{CameraPose, Scene};
 
+use crate::actors::Selected;
 use crate::camera::EditorCamera;
 
 /// How often the open scene file is checked for a newer write. Half a
@@ -174,6 +175,7 @@ pub fn apply_scene(
     mut events: MessageReader<AssetEvent<Scene>>,
     mut shown: ResMut<Shown>,
     mut working: ResMut<Working>,
+    mut selected: ResMut<Selected>,
     content: Query<Entity, With<SceneContent>>,
     mut cameras: Query<(&mut Transform, &mut Projection), With<EditorCamera>>,
 ) {
@@ -194,6 +196,10 @@ pub fn apply_scene(
     // A scene edited outside the editor replaces whatever was here: an
     // external change wins, and the models are rebuilt from it below.
     working.0 = Some(scene.clone());
+    // A scene that came back shorter than the one on screen has taken
+    // actors away, and a selection that kept pointing would be describing
+    // whatever now stands there.
+    selected.retain(scene.actors.len());
     for entity in &content {
         commands.entity(entity).despawn();
     }

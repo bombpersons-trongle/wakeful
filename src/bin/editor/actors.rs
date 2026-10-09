@@ -14,6 +14,7 @@
 
 use bevy::gltf::Gltf;
 use bevy::prelude::*;
+use bevy_egui::egui;
 
 use wakeful::scene::{Actor, Scene};
 use wakeful::walkmesh;
@@ -39,10 +40,91 @@ pub struct EditorActor {
 #[derive(Component)]
 pub struct PendingModel(Handle<Gltf>);
 
-/// The actor the properties window is showing, by its index in the
-/// scene's list.
+/// The actors selected, by their index in the scene's list.
+///
+/// The order is the whole of "which one is primary": the most recently
+/// picked is last, the properties window shows and edits that one, and the
+/// group moves around it. It is a list rather than a set so that picking a
+/// second actor and then a first one leaves the second as the primary.
 #[derive(Resource, Default)]
-pub struct Selected(pub Option<usize>);
+pub struct Selected(Vec<usize>);
+
+impl Selected {
+    /// A plain click: this one and nothing else.
+    pub fn only(&mut self, index: usize) {
+        self.0.clear();
+        self.0.push(index);
+    }
+
+    /// Shift-click: this one in or out, the rest untouched.
+    pub fn toggle(&mut self, index: usize) {
+        match self.0.iter().position(|picked| *picked == index) {
+            Some(at) => {
+                self.0.remove(at);
+            }
+            None => self.0.push(index),
+        }
+    }
+
+    /// Takes everything the brush covers, in the order the boxes were
+    /// given. A brush held with shift adds to what is already selected
+    /// rather than replacing it.
+    pub fn sweep(
+        &mut self,
+        brush: egui::Rect,
+        boxes: impl Iterator<Item = (usize, egui::Rect)>,
+        additive: bool,
+    ) {
+        // Sorted, so the primary after a sweep is always the last actor in
+        // the list rather than whichever box the world happened to yield
+        // first.
+        let mut covered: Vec<usize> = boxes
+            .filter(|(_, rect)| brush.intersects(*rect))
+            .map(|(index, _)| index)
+            .collect();
+        covered.sort_unstable();
+        if !additive {
+            self.0.clear();
+        }
+        for index in covered {
+            self.toggle(index);
+        }
+    }
+
+    /// Forgets the indices a scene that has just been reloaded no longer
+    /// has. Without this a selection would go on pointing at whatever now
+    /// stands where the old actors did.
+    pub fn retain(&mut self, count: usize) {
+        self.0.retain(|index| *index < count);
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    /// The actor everything else is judged against: the properties
+    /// window's subject, and the one whose numbers it shows.
+    pub fn primary(&self) -> Option<usize> {
+        self.0.last().copied()
+    }
+
+    pub fn contains(&self, index: usize) -> bool {
+        self.0.contains(&index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The selection as a slice, in pick order.
+    pub fn picked(&self) -> &[usize] {
+        &self.0
+    }
+}
 
 /// Where the camera is pointing, as a place on the ground.
 ///
@@ -198,22 +280,36 @@ pub fn attach_models(
     }
 }
 
-/// Draws a box around the selected actor. Gizmos are drawn without a depth
-/// test, so the selection shows through the background card — which is the
-/// whole difficulty with a scene this flat and this far away.
+/// Draws a box around every selected actor. Gizmos are drawn without a
+/// depth test, so the selection shows through the background card — which
+/// is the whole difficulty with a scene this flat and this far away.
+///
+/// The primary is drawn at full strength and the rest dimmer, so the one
+/// the properties window is about is obvious without reading the list.
 pub fn draw_selection(
     selected: Res<Selected>,
     standing: Query<(&EditorActor, &Transform)>,
     mut gizmos: Gizmos,
 ) {
-    let Some(index) = selected.0 else {
-        return;
-    };
-    let Some((_, transform)) = standing.iter().find(|(actor, _)| actor.index == index) else {
-        return;
-    };
-    let color = Color::srgb(1.0, 0.65, 0.15);
-    let base = transform.translation;
+    let primary = selected.primary();
+    for (actor, transform) in standing.iter() {
+        let index = actor.index;
+        if !selected.contains(index) {
+            continue;
+        }
+        let color = if Some(index) == primary {
+            Color::srgb(1.0, 0.65, 0.15)
+        } else {
+            Color::srgba(1.0, 0.65, 0.15, 0.55)
+        };
+        actor_box_edges(&mut gizmos, transform.translation, color);
+    }
+}
+
+/// The edges of the box an actor is picked within, which is also the box
+/// its selection is drawn as: one shape for both, so a click lands where
+/// the outline is.
+fn actor_box_edges(gizmos: &mut Gizmos, base: Vec3, color: Color) {
     let low = base.y + 0.02;
     let high = base.y + BOX_HEIGHT;
     let corner = |dx: f32, dz: f32, y: f32| base + Vec3::new(dx, y, dz);
@@ -260,6 +356,103 @@ pub fn track_ground_pointer(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A rectangle ten by ten, at a spot.
+    fn rect(x: f32, y: f32) -> egui::Rect {
+        egui::Rect::from_min_max(egui::pos2(x, y), egui::pos2(x + 10.0, y + 10.0))
+    }
+
+    #[test]
+    fn a_plain_pick_leaves_one_actor_selected() {
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.only(2);
+        assert_eq!(selected.picked(), [2]);
+        assert_eq!(selected.primary(), Some(2));
+    }
+
+    #[test]
+    fn shift_picking_joins_and_leaves_the_others_alone() {
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.toggle(2);
+        assert_eq!(selected.picked(), [0, 2]);
+        assert!(selected.contains(0));
+        // Picking the primary again takes it back out.
+        selected.toggle(0);
+        assert_eq!(selected.picked(), [2]);
+    }
+
+    #[test]
+    fn the_primary_is_whoever_was_picked_last() {
+        // Which actor the properties window is about, and which one a group
+        // moves around, has to survive picking out of order.
+        let mut selected = Selected::default();
+        selected.only(3);
+        selected.toggle(1);
+        assert_eq!(selected.primary(), Some(1));
+        selected.toggle(3);
+        assert_eq!(selected.primary(), Some(1));
+    }
+
+    #[test]
+    fn picking_the_same_actor_twice_ends_with_nothing() {
+        let mut selected = Selected::default();
+        selected.toggle(1);
+        assert_eq!(selected.picked(), [1]);
+        selected.toggle(1);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn a_sweep_takes_what_it_covers_and_leaves_the_rest() {
+        let boxes = [(0, rect(0.0, 0.0)), (1, rect(40.0, 40.0)), (2, rect(80.0, 80.0))];
+        let mut selected = Selected::default();
+        // A brush across the first two, stopping short of the third.
+        let brush = egui::Rect::from_min_max(egui::pos2(-5.0, -5.0), egui::pos2(55.0, 55.0));
+        selected.sweep(brush, boxes.into_iter(), false);
+        assert_eq!(selected.picked(), [0, 1]);
+    }
+
+    #[test]
+    fn a_sweep_replaces_what_was_picked_unless_shift_is_held() {
+        let boxes = [(0, rect(0.0, 0.0)), (1, rect(40.0, 40.0))];
+        let brush = egui::Rect::from_min_max(egui::pos2(-5.0, -5.0), egui::pos2(15.0, 15.0));
+        let mut replacing = Selected::default();
+        replacing.only(1);
+        replacing.sweep(brush, boxes.into_iter(), false);
+        assert_eq!(replacing.picked(), [0]);
+
+        let mut adding = Selected::default();
+        adding.only(1);
+        adding.sweep(brush, boxes.into_iter(), true);
+        assert_eq!(adding.picked(), [1, 0]);
+    }
+
+    #[test]
+    fn a_shift_sweep_over_something_already_picked_takes_it_back_out() {
+        let mut selected = Selected::default();
+        selected.only(2);
+        selected.toggle(0);
+        let boxes = [(0, rect(0.0, 0.0)), (2, rect(80.0, 80.0))];
+        // A brush over the first box only. 2 was picked before the sweep
+        // and the brush misses it, so it stays; the one the brush does
+        // cover was already picked too, and a shift-sweep takes it back
+        // out rather than leaving it in.
+        selected.sweep(rect(-5.0, -5.0), boxes.into_iter(), true);
+        assert_eq!(selected.picked(), [2]);
+    }
+
+    #[test]
+    fn a_reloaded_scene_takes_the_actors_it_no_longer_has() {
+        // A selection left pointing past the end of the list would describe
+        // whatever now stands where the old actors did.
+        let mut selected = Selected::default();
+        selected.only(0);
+        selected.toggle(5);
+        selected.retain(3);
+        assert_eq!(selected.picked(), [0]);
+    }
 
     fn actor(model: &str) -> Actor {
         Actor {

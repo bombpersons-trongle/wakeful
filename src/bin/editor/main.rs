@@ -118,7 +118,7 @@ fn main() {
     // a click on whatever the menu covered.
     .add_systems(
         EguiPrimaryContextPass,
-        (ui::panels, picking::select_on_click).chain(),
+        (picking::select_in_viewport, ui::panels).chain(),
     );
 
     app.run();
