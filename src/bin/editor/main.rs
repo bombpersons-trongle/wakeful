@@ -88,6 +88,8 @@ fn main() {
     .init_resource::<ui::Models>()
     .init_resource::<ui::Dialog>()
     .init_resource::<ui::Scenes>()
+    .init_resource::<ui::ListSweep>()
+    .init_resource::<picking::ViewportSweep>()
     .init_resource::<camera::UiWantsInput>()
     .init_resource::<scene_view::Working>()
     .add_systems(Startup, (setup, ui::list_assets))
