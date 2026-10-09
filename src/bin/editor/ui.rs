@@ -338,71 +338,95 @@ fn actor_list(
     pointer: &GroundPointer,
 ) {
     let count = scene.actors.len();
-    egui::Window::new("Actors")
+    // Which row the pointer is over, which is what tells the two menus
+    // apart: a right-click on a name is about that actor, anywhere else
+    // in the window — beside a name, under the list — is about the list.
+    let mut over_row = None;
+    let shown = egui::Window::new("Actors")
         .default_pos(docked(ACTORS_TOP))
         .resizable(true)
         .show(ctx, |ui| {
             if count == 0 {
-                ui.label("None yet. Right-click below to add one.");
+                ui.label("None yet. Right-click to add one.");
             }
             for index in 0..count {
-                // A copy, because the menu below edits the list this row
-                // is standing in.
-                let actor = scene.actors[index].clone();
-                let row = ui.selectable_value(&mut selected.0, Some(index), actor_label(&actor));
-                // A right-click means "this one", and says so before the
-                // menu asks whether anything is selected.
-                if row.secondary_clicked() {
+                let name = actor_label(&scene.actors[index]);
+                let chosen = selected.0 == Some(index);
+                // The name and not the width of the window, so the space
+                // beside a name still belongs to the list. Selection is
+                // marked in the text rather than with a bar across the
+                // window, because a bar would have to be the width of the
+                // window to line up with the rows.
+                let row = ui.add(
+                    egui::Label::new(if chosen { format!("> {name}") } else { name })
+                        .sense(egui::Sense::click()),
+                );
+                if row.clicked() || row.secondary_clicked() {
                     selected.0 = Some(index);
                 }
-                let chosen = selected.0 == Some(index);
-                row.context_menu(|ui| {
-                    if ui.add_enabled(chosen, egui::Button::new("Copy")).clicked() {
-                        copy_actor(scene, index, clipboard);
-                    }
-                    if ui
-                        .add_enabled(chosen, egui::Button::new("Delete"))
-                        .clicked()
-                    {
-                        delete_actor(scene, index, selected);
-                    }
-                });
-            }
-            // The space below the list. Adding and pasting belong to no
-            // actor in particular, and this rect deliberately does not
-            // overlap a row: an interact that covered the list would take
-            // the clicks and the hover away from the rows above it.
-            let empty = space_below(ui);
-            if empty.height() > 8.0 {
-                ui.interact(empty, ui.id().with("empty"), egui::Sense::click())
-                    .context_menu(|ui| {
-                        if ui
-                            .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
-                            .clicked()
-                        {
-                            paste_into(scene, clipboard, pointer, selected);
-                        }
-                        ui.separator();
-                        ui.label("Add");
-                        for model in &models.0 {
-                            if ui.button(short_name(model)).clicked() {
-                                scene.actors.push(new_actor(model, pointer));
-                                selected.0 = Some(scene.actors.len() - 1);
-                            }
-                        }
-                    });
+                if row.contains_pointer() {
+                    over_row = Some(index);
+                }
             }
         });
+    let Some(shown) = shown else {
+        return;
+    };
+    // One menu for the window, wherever the right-click lands: a list
+    // sized to its rows has no empty space below to aim at, and a menu
+    // that only appeared there is a menu nobody finds.
+    shown.response.context_menu(|ui| {
+        // A right-click on a name means that actor, whether or not a left
+        // click had selected it first.
+        if let Some(index) = over_row {
+            selected.0 = Some(index);
+        }
+        let chosen = selected.0.filter(|index| *index < count);
+        if over_row.is_some() {
+            // The actor's own menu: only what can be done to that actor.
+            copy_item(ui, chosen, scene, clipboard);
+            delete_item(ui, chosen, scene, selected);
+        } else {
+            // The list's: what can be done to the scene around them.
+            copy_item(ui, chosen, scene, clipboard);
+            if ui
+                .add_enabled(clipboard.0.is_some(), egui::Button::new("Paste"))
+                .clicked()
+            {
+                paste_into(scene, clipboard, pointer, selected);
+            }
+            ui.separator();
+            ui.label("Add");
+            for model in &models.0 {
+                if ui.button(short_name(model)).clicked() {
+                    scene.actors.push(new_actor(model, pointer));
+                    selected.0 = Some(scene.actors.len() - 1);
+                }
+            }
+        }
+    });
 }
 
-/// The part of a window below whatever has been drawn in it: the empty
-/// space under a list, which is not where the rows are and so cannot take
-/// their clicks.
-fn space_below(ui: &egui::Ui) -> egui::Rect {
-    egui::Rect::from_min_max(
-        egui::pos2(ui.max_rect().left(), ui.min_rect().bottom() + 4.0),
-        egui::pos2(ui.max_rect().right(), ui.max_rect().bottom()),
-    )
+/// Copying, offered only when there is an actor to copy.
+fn copy_item(ui: &mut egui::Ui, chosen: Option<usize>, scene: &Scene, clipboard: &mut Clipboard) {
+    if ui
+        .add_enabled(chosen.is_some(), egui::Button::new("Copy"))
+        .clicked()
+        && let Some(index) = chosen
+    {
+        copy_actor(scene, index, clipboard);
+    }
+}
+
+/// Deleting, likewise.
+fn delete_item(ui: &mut egui::Ui, chosen: Option<usize>, scene: &mut Scene, selected: &mut Selected) {
+    if ui
+        .add_enabled(chosen.is_some(), egui::Button::new("Delete"))
+        .clicked()
+        && let Some(index) = chosen
+    {
+        delete_actor(scene, index, selected);
+    }
 }
 
 /// Copying an actor takes the one it was copied from.
