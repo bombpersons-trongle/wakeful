@@ -13,6 +13,7 @@
 //! only prove the test passes.
 
 use bevy::prelude::*;
+use bevy::window::{MonitorSelection, WindowMode};
 use bevy_egui::{EguiContexts, egui};
 
 use wakeful::assets::assets_root;
@@ -121,6 +122,7 @@ fn list_models(models: &mut Models) {
 #[allow(clippy::too_many_arguments)]
 pub fn panels(
     mut ctxs: EguiContexts,
+    windows: Query<&mut Window>,
     assets: Res<AssetServer>,
     scenes: Res<Scenes>,
     mut working: ResMut<Working>,
@@ -144,6 +146,7 @@ pub fn panels(
 
     menu_bar(
         ctx,
+        windows,
         &mut working,
         &mut selected,
         &mut clipboard,
@@ -190,6 +193,7 @@ pub fn panels(
 #[allow(clippy::too_many_arguments)]
 fn menu_bar(
     ctx: &egui::Context,
+    mut windows: Query<&mut Window>,
     working: &mut Working,
     selected: &mut Selected,
     clipboard: &mut Clipboard,
@@ -244,6 +248,29 @@ fn menu_bar(
                 ui.separator();
                 if ui.button("Quit").clicked() {
                     exit.write(AppExit::Success);
+                }
+            });
+            ui.menu_button("View", |ui| {
+                let fullscreen = windows
+                    .iter()
+                    .next()
+                    .is_some_and(|window| window.mode != WindowMode::Windowed);
+                if ui
+                    .selectable_label(fullscreen, "Fullscreen")
+                    .clicked()
+                {
+                    for mut window in &mut windows {
+                        window.mode = if fullscreen {
+                            WindowMode::Windowed
+                        } else {
+                            // Borderless, not exclusive: a tool keeps the
+                            // desktop's resolution and its escape hatches,
+                            // which is what an exclusive fullscreen takes
+                            // away along with the title bar.
+                            WindowMode::BorderlessFullscreen(MonitorSelection::Current)
+                        };
+                    }
+                    ui.close();
                 }
             });
             ui.menu_button("Edit", |ui| {
