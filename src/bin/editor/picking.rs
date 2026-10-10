@@ -8,7 +8,7 @@
 use bevy::prelude::*;
 use bevy_egui::{EguiContexts, egui};
 
-use crate::actors::{BOX_HALF_WIDTH, BOX_HEIGHT, EditorActor, Selected};
+use crate::actors::{BOX_HALF_WIDTH, BOX_HEIGHT, EditorActor, Selected, box_corners};
 
 /// The distance along a ray at which it enters a box, or `None` when it
 /// misses. The slab test, which unlike a mesh test costs nothing and
@@ -179,22 +179,6 @@ fn screen_boxes(
         .collect()
 }
 
-/// The eight corners of the box an actor is picked within.
-fn box_corners(base: Vec3) -> impl Iterator<Item = Vec3> {
-    let (w, d, h) = (BOX_HALF_WIDTH, BOX_HALF_WIDTH, BOX_HEIGHT);
-    [
-        (0.0, 0.0),
-        (w, 0.0),
-        (w, d),
-        (0.0, d),
-        (0.0, h),
-        (w, h),
-        (w, d + h),
-        (0.0, d + h),
-    ]
-    .into_iter()
-    .map(move |(dx, y)| base + Vec3::new(dx, y, dx))
-}
 
 /// The actor whose box the cursor is inside, nearest the camera first:
 /// two actors can overlap on screen, and the one in front is the one you

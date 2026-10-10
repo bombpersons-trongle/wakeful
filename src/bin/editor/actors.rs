@@ -27,6 +27,28 @@ use crate::scene_view::Working;
 pub const BOX_HALF_WIDTH: f32 = 0.45;
 pub const BOX_HEIGHT: f32 = 1.6;
 
+/// The eight corners of the box an actor is picked within and drawn with,
+/// base ring first so the two rings line up: corner 4 is corner 0 raised.
+///
+/// One shape for both, so a click lands where the outline is. The base ring
+/// rides 2cm off the ground it was snapped to rather than sitting on it,
+/// which keeps an outline on a lit surface from fighting the mesh.
+pub fn box_corners(at: Vec3) -> [Vec3; 8] {
+    let w = BOX_HALF_WIDTH;
+    let lip = 0.02;
+    [
+        Vec3::new(-w, lip, -w),
+        Vec3::new(w, lip, -w),
+        Vec3::new(w, lip, w),
+        Vec3::new(-w, lip, w),
+        Vec3::new(-w, BOX_HEIGHT, -w),
+        Vec3::new(w, BOX_HEIGHT, -w),
+        Vec3::new(w, BOX_HEIGHT, w),
+        Vec3::new(-w, BOX_HEIGHT, w),
+    ]
+    .map(|corner| at + corner)
+}
+
 /// An actor standing in the viewport, and which entry of the scene's list
 /// it is. The model is remembered so a reload that swaps one actor's model
 /// rebuilds it instead of leaving the old one standing there.
@@ -310,27 +332,18 @@ pub fn draw_selection(
 /// its selection is drawn as: one shape for both, so a click lands where
 /// the outline is.
 fn actor_box_edges(gizmos: &mut Gizmos, base: Vec3, color: Color) {
-    let low = base.y + 0.02;
-    let high = base.y + BOX_HEIGHT;
-    let corner = |dx: f32, dz: f32, y: f32| base + Vec3::new(dx, y, dz);
-    let (w, d) = (BOX_HALF_WIDTH, BOX_HALF_WIDTH);
-    let edges = [
-        // The four uprights.
-        (corner(-w, -d, low), corner(-w, -d, high)),
-        (corner(w, -d, low), corner(w, -d, high)),
-        (corner(-w, d, low), corner(-w, d, high)),
-        (corner(w, d, low), corner(w, d, high)),
-        // The base it stands on, and the line across its head, so the box
-        // reads as a thing rather than a post.
-        (corner(-w, -d, low), corner(w, -d, low)),
-        (corner(-w, d, low), corner(w, d, low)),
-        (corner(-w, -d, low), corner(-w, d, low)),
-        (corner(w, -d, low), corner(w, d, low)),
-        (corner(-w, -d, high), corner(w, -d, high)),
-        (corner(-w, d, high), corner(w, d, high)),
-        (corner(-w, -d, high), corner(-w, d, high)),
-        (corner(w, -d, high), corner(w, d, high)),
-    ];
+    let corners = box_corners(base);
+    // The four uprights, the ring at the feet, the ring at the head: twelve
+    // lines is the least that reads as a box.
+    let edges = (0..4)
+        .flat_map(|at| [(corners[at], corners[at + 4])])
+        .chain((0..4).flat_map(|at| [(corners[at], corners[(at + 1) % 4])]))
+        .chain((0..4).flat_map(|at| {
+            [(
+                corners[at + 4],
+                corners[4 + (at + 1) % 4],
+            )]
+        }));
     for (from, to) in edges {
         gizmos.line(from, to, color);
     }
@@ -523,5 +536,46 @@ mod tests {
     fn a_model_named_by_path_is_left_alone() {
         assert_eq!(model_path("goblin.glb"), "models/goblin.glb");
         assert_eq!(model_path("models/custom.glb"), "models/custom.glb");
+    }
+
+    #[test]
+    fn the_box_stands_on_the_ground_it_was_given() {
+        // The box is drawn at an actor's snapped height, and the height is
+        // a number that has to survive being carried in the base twice: a
+        // corner is the base plus an offset, and the base already holds the
+        // height. This went out once as double the ground.
+        let at = Vec3::new(-30.0, 6.598, -105.0);
+        let corners = box_corners(at);
+        let (low, high) = corners
+            .iter()
+            .map(|corner| corner.y)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), y| {
+                (low.min(y), high.max(y))
+            });
+        assert!((low - (at.y + 0.02)).abs() < 1e-6, "{low}");
+        assert!((high - (at.y + BOX_HEIGHT)).abs() < 1e-6, "{high}");
+    }
+
+    #[test]
+    fn the_box_holds_the_whole_ground_spot() {
+        let at = Vec3::new(-30.0, 6.598, -105.0);
+        let corners = box_corners(at);
+        let (low_x, high_x) = corners
+            .iter()
+            .map(|corner| corner.x)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), x| {
+                (low.min(x), high.max(x))
+            });
+        let (low_z, high_z) = corners
+            .iter()
+            .map(|corner| corner.z)
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(low, high), z| {
+                (low.min(z), high.max(z))
+            });
+        // A body-sized square either side of it, and its feet inside it.
+        assert!((low_x - (at.x - BOX_HALF_WIDTH)).abs() < 1e-6, "{low_x}");
+        assert!((high_x - (at.x + BOX_HALF_WIDTH)).abs() < 1e-6, "{high_x}");
+        assert!((low_z - (at.z - BOX_HALF_WIDTH)).abs() < 1e-6, "{low_z}");
+        assert!((high_z - (at.z + BOX_HALF_WIDTH)).abs() < 1e-6, "{high_z}");
     }
 }
